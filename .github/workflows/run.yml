@@ -1,28 +1,67 @@
-name: Cryptone V11
+name: Bot Cryptone V11
 
 on:
+  push:
+    branches: [ main ]
+
   workflow_dispatch:
+
+  schedule:
+    - cron: '*/20 * * * *'
+
+concurrency:
+  group: bot-v11
+  cancel-in-progress: false
 
 jobs:
 
-  bot:
+  run-bot:
 
     runs-on: ubuntu-latest
 
+    timeout-minutes: 60
+
     steps:
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: |
+      - name: Restore state
+        uses: actions/cache@v3
+        with:
+          path: |
+            data/
+            logs/
+            *.db
+            *.json
+          key: bot-${{ github.run_id }}
+          restore-keys: |
+            bot-
+
+      - name: Install
+        run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - run: |
-          python main.py
+      - name: Run Bot
         env:
           TOKEN: ${{ secrets.TOKEN }}
           USER_ID: ${{ secrets.USER_ID }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python main.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            data/
+            logs/
+            *.db
+            *.json
+          key: bot-${{ github.run_id }}
