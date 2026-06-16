@@ -497,7 +497,6 @@ def db_connect():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
-
 def init_db():
     conn = None
     try:
@@ -586,193 +585,188 @@ def init_db():
             mode_balanced REAL,
             mode_precision REAL,
             confidence_breakdown TEXT
-            )''')
-# 3. counterfactual
-c.execute('''CREATE TABLE IF NOT EXISTS counterfactual (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    coin TEXT,
-    original_score INTEGER,
-    modified_module TEXT,
-    modified_score INTEGER,
-    reason TEXT
-)''')
+        )''')
 
-# 4. shadow_decisions
-c.execute('''CREATE TABLE IF NOT EXISTS shadow_decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    signal_id TEXT UNIQUE,
-    coin TEXT,
-    direction TEXT,
-    entry_price REAL,
-    sl_price REAL,
-    tp_price REAL,
-    timestamp INTEGER,
-    evaluated INTEGER DEFAULT 0,
-    outcome TEXT,
-    pnl REAL,
-    mfe REAL,
-    mae REAL
-)''')
+        # 3. counterfactual
+        c.execute('''CREATE TABLE IF NOT EXISTS counterfactual (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            original_score INTEGER,
+            modified_module TEXT,
+            modified_score INTEGER,
+            reason TEXT
+        )''')
 
-# 5. hypothesis_validation
-c.execute('''CREATE TABLE IF NOT EXISTS hypothesis_validation (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    signal_id TEXT,
-    thesis TEXT,
-    outcome TEXT,
-    pnl REAL,
-    validated INTEGER
-)''')
+        # 4. shadow_decisions
+        c.execute('''CREATE TABLE IF NOT EXISTS shadow_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT UNIQUE,
+            coin TEXT,
+            direction TEXT,
+            entry_price REAL,
+            sl_price REAL,
+            tp_price REAL,
+            timestamp INTEGER,
+            evaluated INTEGER DEFAULT 0,
+            outcome TEXT,
+            pnl REAL,
+            mfe REAL,
+            mae REAL
+        )''')
 
-# 6. prediction_quality
-c.execute('''CREATE TABLE IF NOT EXISTS prediction_quality (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    coin TEXT,
-    signal_id TEXT,
-    predicted_direction TEXT,
-    actual_direction TEXT,
-    entry_zone_accuracy REAL,
-    timing_quality REAL,
-    thesis_validated INTEGER,
-    quality_score REAL
-)''')
+        # 5. hypothesis_validation
+        c.execute('''CREATE TABLE IF NOT EXISTS hypothesis_validation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT,
+            thesis TEXT,
+            outcome TEXT,
+            pnl REAL,
+            validated INTEGER
+        )''')
 
-# 7. belief_state_log
-c.execute('''CREATE TABLE IF NOT EXISTS belief_state_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    coin TEXT,
-    state TEXT,
-    duration_seconds REAL,
-    trigger TEXT
-)''')
+        # 6. prediction_quality
+        c.execute('''CREATE TABLE IF NOT EXISTS prediction_quality (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            signal_id TEXT,
+            predicted_direction TEXT,
+            actual_direction TEXT,
+            entry_zone_accuracy REAL,
+            timing_quality REAL,
+            thesis_validated INTEGER,
+            quality_score REAL
+        )''')
 
-# 8. decision_traces
-c.execute('''CREATE TABLE IF NOT EXISTS decision_traces (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    coin TEXT,
-    event_type TEXT,
-    belief_state TEXT,
-    confidence REAL,
-    decision_energy REAL,
-    final_decision TEXT,
-    reasons TEXT,
-    why_not TEXT,
-    what_changed TEXT,
-    context_age REAL,
-    execution_mode TEXT
-)''')
+        # 7. belief_state_log
+        c.execute('''CREATE TABLE IF NOT EXISTS belief_state_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            state TEXT,
+            duration_seconds REAL,
+            trigger TEXT
+        )''')
 
-# 9. context_log
-c.execute('''CREATE TABLE IF NOT EXISTS context_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    shock_score REAL,
-    transition_prob REAL,
-    tension REAL,
-    vol_forecast REAL,
-    breath_bull REAL,
-    breath_bear REAL,
-    event_risk REAL,
-    dominance REAL,
-    regime TEXT
-)''')
+        # 8. decision_traces
+        c.execute('''CREATE TABLE IF NOT EXISTS decision_traces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            event_type TEXT,
+            belief_state TEXT,
+            confidence REAL,
+            decision_energy REAL,
+            final_decision TEXT,
+            reasons TEXT,
+            why_not TEXT,
+            what_changed TEXT,
+            context_age REAL,
+            execution_mode TEXT
+        )''')
 
-# 10. intent_memory
-c.execute('''CREATE TABLE IF NOT EXISTS intent_memory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    coin TEXT,
-    intent TEXT,
-    outcome TEXT,
-    pnl REAL
-)''')
+        # 9. context_log
+        c.execute('''CREATE TABLE IF NOT EXISTS context_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            shock_score REAL,
+            transition_prob REAL,
+            tension REAL,
+            vol_forecast REAL,
+            breath_bull REAL,
+            breath_bear REAL,
+            event_risk REAL,
+            dominance REAL,
+            regime TEXT
+        )''')
 
-# 11. reaction_log
-c.execute('''CREATE TABLE IF NOT EXISTS reaction_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER,
-    event TEXT,
-    expected_vol REAL,
-    expected_direction TEXT,
-    actual_vol REAL,
-    actual_direction TEXT,
-    actual_move REAL,
-    absorption REAL,
-    confidence REAL
-)''')
+        # 10. intent_memory
+        c.execute('''CREATE TABLE IF NOT EXISTS intent_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            intent TEXT,
+            outcome TEXT,
+            pnl REAL
+        )''')
 
-conn.commit()
+        # 11. reaction_log
+        c.execute('''CREATE TABLE IF NOT EXISTS reaction_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            event TEXT,
+            expected_vol REAL,
+            expected_direction TEXT,
+            actual_vol REAL,
+            actual_direction TEXT,
+            actual_move REAL,
+            absorption REAL,
+            confidence REAL
+        )''')
 
-    # ========== MIGRASI OTOMATIS ==========
-    MIGRATIONS = [
-        # journal
-        ("journal", "execution_mode", "TEXT", "''"),
-        ("journal", "intent_type", "TEXT", "''"),
-        ("journal", "why_not", "TEXT", "''"),
-        ("journal", "wait_value", "REAL", "0.0"),
-        ("journal", "trigger_strength", "REAL", "0.0"),
-        ("journal", "rejection_strength", "REAL", "0.0"),
-        ("journal", "acceptance_strength", "REAL", "0.0"),
-        ("journal", "persistence_strength", "REAL", "0.0"),
-        ("journal", "filter_score", "REAL", "100.0"),
-        ("journal", "position_size_mult", "REAL", "1.0"),
-        ("journal", "decision_acceleration", "REAL", "0.0"),
-        ("journal", "mode_aggressive", "REAL", "0.0"),
-        ("journal", "mode_balanced", "REAL", "1.0"),
-        ("journal", "mode_precision", "REAL", "0.0"),
-        ("journal", "confidence_breakdown", "TEXT", "''"),
-        ("journal", "belief_state", "TEXT", "'SEEKING'"),
-        ("journal", "decision_energy", "REAL", "0.0"),
-        ("journal", "commitment_score", "REAL", "0.0"),
-        ("journal", "time_pressure", "TEXT", "'normal'"),
-        
-        # signals
-        ("signals", "execution_mode", "TEXT", "'BALANCED'"),
-        ("signals", "intent_type", "TEXT", "''"),
-        ("signals", "decision_energy", "REAL", "0.0"),
-        ("signals", "position_size_mult", "REAL", "1.0"),
-        ("signals", "filter_score", "REAL", "100.0"),
-        ("signals", "intent_confidence", "REAL", "0.0"),
-        ("signals", "belief_state", "TEXT", "'SEEKING'"),
-        ("signals", "commitment_score", "REAL", "0.0"),
-        ("signals", "time_pressure", "TEXT", "'normal'"),
-        ("signals", "prediction_quality", "REAL", "50.0"),
-        
-        # decision_traces
-        ("decision_traces", "context_age", "REAL", "0.0"),
-        ("decision_traces", "execution_mode", "TEXT", "'NORMAL'"),
-    ]
+        conn.commit()
 
-    for table, col, col_type, default in MIGRATIONS:
-        try:
-            c.execute(f"PRAGMA table_info({table})")
-            existing_cols = [row[1] for row in c.fetchall()]
-            
-            if col not in existing_cols:
-                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type} DEFAULT {default}")
-                logger.info(f"✅ Migrated {table}: added column {col}")
-                
-        except sqlite3.OperationalError as e:
-            if "duplicate column" in str(e).lower():
-                pass
-            else:
-                logger.warning(f"Migration failed for {table}.{col}: {e}")
-        except Exception as e:
-            logger.warning(f"Migration error for {table}.{col}: {e}")
+        # ========== MIGRASI OTOMATIS ==========
+        MIGRATIONS = [
+            ("journal", "execution_mode", "TEXT", "''"),
+            ("journal", "intent_type", "TEXT", "''"),
+            ("journal", "why_not", "TEXT", "''"),
+            ("journal", "wait_value", "REAL", "0.0"),
+            ("journal", "trigger_strength", "REAL", "0.0"),
+            ("journal", "rejection_strength", "REAL", "0.0"),
+            ("journal", "acceptance_strength", "REAL", "0.0"),
+            ("journal", "persistence_strength", "REAL", "0.0"),
+            ("journal", "filter_score", "REAL", "100.0"),
+            ("journal", "position_size_mult", "REAL", "1.0"),
+            ("journal", "decision_acceleration", "REAL", "0.0"),
+            ("journal", "mode_aggressive", "REAL", "0.0"),
+            ("journal", "mode_balanced", "REAL", "1.0"),
+            ("journal", "mode_precision", "REAL", "0.0"),
+            ("journal", "confidence_breakdown", "TEXT", "''"),
+            ("journal", "belief_state", "TEXT", "'SEEKING'"),
+            ("journal", "decision_energy", "REAL", "0.0"),
+            ("journal", "commitment_score", "REAL", "0.0"),
+            ("journal", "time_pressure", "TEXT", "'normal'"),
+            ("signals", "execution_mode", "TEXT", "'BALANCED'"),
+            ("signals", "intent_type", "TEXT", "''"),
+            ("signals", "decision_energy", "REAL", "0.0"),
+            ("signals", "position_size_mult", "REAL", "1.0"),
+            ("signals", "filter_score", "REAL", "100.0"),
+            ("signals", "intent_confidence", "REAL", "0.0"),
+            ("signals", "belief_state", "TEXT", "'SEEKING'"),
+            ("signals", "commitment_score", "REAL", "0.0"),
+            ("signals", "time_pressure", "TEXT", "'normal'"),
+            ("signals", "prediction_quality", "REAL", "50.0"),
+            ("decision_traces", "context_age", "REAL", "0.0"),
+            ("decision_traces", "execution_mode", "TEXT", "'NORMAL'"),
+        ]
 
-    conn.commit()
-    logger.info("✅ Database ready (V10)")
-    
-except Exception as e:
-    logger.error(f"init_db error: {e}")
-    raise
-finally:
-    if conn:
-        conn.close()
+        for table, col, col_type, default in MIGRATIONS:
+            try:
+                c.execute(f"PRAGMA table_info({table})")
+                existing_cols = [row[1] for row in c.fetchall()]
+                if col not in existing_cols:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type} DEFAULT {default}")
+                    logger.info(f"✅ Migrated {table}: added column {col}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass
+                else:
+                    logger.warning(f"Migration failed for {table}.{col}: {e}")
+            except Exception as e:
+                logger.warning(f"Migration error for {table}.{col}: {e}")
+
+        conn.commit()
+        logger.info("✅ Database ready (V10)")
+
+    except Exception as e:
+        logger.error(f"init_db error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
 
 # ========== SAVE FUNCTIONS ==========
 
