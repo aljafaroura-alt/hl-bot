@@ -488,192 +488,383 @@ except ImportError:
     HAS_PSUTIL = False
     
 # ========== DATABASE ==========
+# ============================================================
+# PART 10 – DATABASE + JOURNAL (FULL V10)
+# ============================================================
+
 def db_connect():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 def init_db():
-    conn = db_connect()
-    c = conn.cursor()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
 
-    c.execute('''CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        signal_id TEXT UNIQUE, coin TEXT, direction TEXT, score INTEGER,
-        entry_price REAL, sl_price REAL, tp_price REAL, rr REAL, reason TEXT,
-        timestamp INTEGER, evaluated INTEGER DEFAULT 0, outcome TEXT, pnl REAL,
-        exit_price REAL, exit_time INTEGER, mfe REAL, mae REAL, data_confidence INTEGER,
-        hypothesis_thesis TEXT, hypothesis_invalidate TEXT, hypothesis_observe TEXT,
-        hypothesis_validated INTEGER DEFAULT 0, execution_mode TEXT, intent_type TEXT,
-        decision_energy REAL, position_size_mult REAL, filter_score REAL,
-        intent_confidence REAL, belief_state TEXT, commitment_score REAL,
-        time_pressure TEXT, prediction_quality REAL
-    )''')
+        # ========== CREATE TABLES ==========
+        
+        # 1. signals
+        c.execute('''CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT UNIQUE,
+            coin TEXT,
+            direction TEXT,
+            score INTEGER,
+            entry_price REAL,
+            sl_price REAL,
+            tp_price REAL,
+            rr REAL,
+            reason TEXT,
+            timestamp INTEGER,
+            evaluated INTEGER DEFAULT 0,
+            outcome TEXT,
+            pnl REAL,
+            exit_price REAL,
+            exit_time INTEGER,
+            mfe REAL,
+            mae REAL,
+            data_confidence INTEGER,
+            hypothesis_thesis TEXT,
+            hypothesis_invalidate TEXT,
+            hypothesis_observe TEXT,
+            hypothesis_validated INTEGER DEFAULT 0,
+            execution_mode TEXT,
+            intent_type TEXT,
+            decision_energy REAL,
+            position_size_mult REAL,
+            filter_score REAL,
+            intent_confidence REAL,
+            belief_state TEXT,
+            commitment_score REAL,
+            time_pressure TEXT,
+            prediction_quality REAL
+        )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS journal (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER, coin TEXT, market_regime TEXT, volatility_regime TEXT,
-        flow_regime TEXT, belief_state TEXT, long_score INTEGER, short_score INTEGER,
-        direction TEXT, final_score INTEGER, reason TEXT, negative_evidence TEXT,
-        entropy_data INTEGER, entropy_market INTEGER, entropy_decision INTEGER,
-        decision_time_ms INTEGER, api_latency_ms INTEGER, data_confidence INTEGER,
-        executed INTEGER DEFAULT 0, outcome TEXT, missed_opportunity_pnl REAL,
-        contribution TEXT, execution_mode TEXT, intent_type TEXT, decision_energy REAL,
-        position_size_mult REAL, filter_score REAL, rejection_strength REAL,
-        acceptance_strength REAL, persistence_strength REAL, why_not TEXT,
-        wait_value REAL, trigger_strength REAL, time_pressure TEXT, commitment_score REAL,
-        decision_acceleration REAL, mode_aggressive REAL, mode_balanced REAL,
-        mode_precision REAL, confidence_breakdown TEXT
-    )''')
+        # 2. journal
+        c.execute('''CREATE TABLE IF NOT EXISTS journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            coin TEXT,
+            market_regime TEXT,
+            volatility_regime TEXT,
+            flow_regime TEXT,
+            belief_state TEXT,
+            long_score INTEGER,
+            short_score INTEGER,
+            direction TEXT,
+            final_score INTEGER,
+            reason TEXT,
+            negative_evidence TEXT,
+            entropy_data INTEGER,
+            entropy_market INTEGER,
+            entropy_decision INTEGER,
+            decision_time_ms INTEGER,
+            api_latency_ms INTEGER,
+            data_confidence INTEGER,
+            executed INTEGER DEFAULT 0,
+            outcome TEXT,
+            missed_opportunity_pnl REAL,
+            contribution TEXT,
+            execution_mode TEXT,
+            intent_type TEXT,
+            decision_energy REAL,
+            position_size_mult REAL,
+            filter_score REAL,
+            rejection_strength REAL,
+            acceptance_strength REAL,
+            persistence_strength REAL,
+            why_not TEXT,
+            wait_value REAL,
+            trigger_strength REAL,
+            time_pressure TEXT,
+            commitment_score REAL,
+            decision_acceleration REAL,
+            mode_aggressive REAL,
+            mode_balanced REAL,
+            mode_precision REAL,
+            confidence_breakdown TEXT
+            )''')
+# 3. counterfactual
+c.execute('''CREATE TABLE IF NOT EXISTS counterfactual (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    coin TEXT,
+    original_score INTEGER,
+    modified_module TEXT,
+    modified_score INTEGER,
+    reason TEXT
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS counterfactual (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, coin TEXT,
-        original_score INTEGER, modified_module TEXT, modified_score INTEGER, reason TEXT
-    )''')
+# 4. shadow_decisions
+c.execute('''CREATE TABLE IF NOT EXISTS shadow_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id TEXT UNIQUE,
+    coin TEXT,
+    direction TEXT,
+    entry_price REAL,
+    sl_price REAL,
+    tp_price REAL,
+    timestamp INTEGER,
+    evaluated INTEGER DEFAULT 0,
+    outcome TEXT,
+    pnl REAL,
+    mfe REAL,
+    mae REAL
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS shadow_decisions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT UNIQUE, coin TEXT,
-        direction TEXT, entry_price REAL, sl_price REAL, tp_price REAL, timestamp INTEGER,
-        evaluated INTEGER DEFAULT 0, outcome TEXT, pnl REAL, mfe REAL, mae REAL
-    )''')
+# 5. hypothesis_validation
+c.execute('''CREATE TABLE IF NOT EXISTS hypothesis_validation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id TEXT,
+    thesis TEXT,
+    outcome TEXT,
+    pnl REAL,
+    validated INTEGER
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS hypothesis_validation (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, thesis TEXT,
-        outcome TEXT, pnl REAL, validated INTEGER
-    )''')
+# 6. prediction_quality
+c.execute('''CREATE TABLE IF NOT EXISTS prediction_quality (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    coin TEXT,
+    signal_id TEXT,
+    predicted_direction TEXT,
+    actual_direction TEXT,
+    entry_zone_accuracy REAL,
+    timing_quality REAL,
+    thesis_validated INTEGER,
+    quality_score REAL
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS prediction_quality (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, coin TEXT,
-        signal_id TEXT, predicted_direction TEXT, actual_direction TEXT,
-        entry_zone_accuracy REAL, timing_quality REAL, thesis_validated INTEGER,
-        quality_score REAL
-    )''')
+# 7. belief_state_log
+c.execute('''CREATE TABLE IF NOT EXISTS belief_state_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    coin TEXT,
+    state TEXT,
+    duration_seconds REAL,
+    trigger TEXT
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS belief_state_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, coin TEXT,
-        state TEXT, duration_seconds REAL, trigger TEXT
-    )''')
+# 8. decision_traces
+c.execute('''CREATE TABLE IF NOT EXISTS decision_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    coin TEXT,
+    event_type TEXT,
+    belief_state TEXT,
+    confidence REAL,
+    decision_energy REAL,
+    final_decision TEXT,
+    reasons TEXT,
+    why_not TEXT,
+    what_changed TEXT,
+    context_age REAL,
+    execution_mode TEXT
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS decision_traces (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, coin TEXT,
-        event_type TEXT, belief_state TEXT, confidence REAL, decision_energy REAL,
-        final_decision TEXT, reasons TEXT, why_not TEXT, what_changed TEXT,
-        context_age REAL, execution_mode TEXT
-    )''')
+# 9. context_log
+c.execute('''CREATE TABLE IF NOT EXISTS context_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    shock_score REAL,
+    transition_prob REAL,
+    tension REAL,
+    vol_forecast REAL,
+    breath_bull REAL,
+    breath_bear REAL,
+    event_risk REAL,
+    dominance REAL,
+    regime TEXT
+)''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS context_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER,
-        shock_score REAL, transition_prob REAL, tension REAL,
-        vol_forecast REAL, breath_bull REAL, breath_bear REAL,
-        event_risk REAL, dominance REAL, regime TEXT
-    )''')
+# 10. intent_memory
+c.execute('''CREATE TABLE IF NOT EXISTS intent_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    coin TEXT,
+    intent TEXT,
+    outcome TEXT,
+    pnl REAL
+)''')
 
-    # V10: intent memory table
-    c.execute('''CREATE TABLE IF NOT EXISTS intent_memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, coin TEXT,
-        intent TEXT, outcome TEXT, pnl REAL
-    )''')
+# 11. reaction_log
+c.execute('''CREATE TABLE IF NOT EXISTS reaction_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    event TEXT,
+    expected_vol REAL,
+    expected_direction TEXT,
+    actual_vol REAL,
+    actual_direction TEXT,
+    actual_move REAL,
+    absorption REAL,
+    confidence REAL
+)''')
 
-    # V10: reaction log table
-    c.execute('''CREATE TABLE IF NOT EXISTS reaction_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER,
-        event TEXT, expected_vol REAL, expected_direction TEXT,
-        actual_vol REAL, actual_direction TEXT, actual_move REAL,
-        absorption REAL, confidence REAL
-    )''')
+conn.commit()
 
-    conn.commit()
-
-    # ===== MIGRASI =====
-    _migrations = [
-        ("journal", "belief_state", "TEXT"),
-        ("journal", "decision_energy", "REAL"),
-        ("journal", "commitment_score", "REAL"),
-        ("journal", "time_pressure", "TEXT"),
-        ("journal", "mode_aggressive", "REAL"),
-        ("journal", "mode_balanced", "REAL"),
-        ("journal", "mode_precision", "REAL"),
-        ("journal", "confidence_breakdown", "TEXT"),
-        ("signals", "intent_confidence", "REAL"),
-        ("signals", "belief_state", "TEXT"),
-        ("signals", "commitment_score", "REAL"),
-        ("signals", "time_pressure", "TEXT"),
-        ("signals", "prediction_quality", "REAL"),
-        ("decision_traces", "context_age", "REAL"),
-        ("decision_traces", "execution_mode", "TEXT"),
+    # ========== MIGRASI OTOMATIS ==========
+    MIGRATIONS = [
+        # journal
+        ("journal", "execution_mode", "TEXT", "''"),
+        ("journal", "intent_type", "TEXT", "''"),
+        ("journal", "why_not", "TEXT", "''"),
+        ("journal", "wait_value", "REAL", "0.0"),
+        ("journal", "trigger_strength", "REAL", "0.0"),
+        ("journal", "rejection_strength", "REAL", "0.0"),
+        ("journal", "acceptance_strength", "REAL", "0.0"),
+        ("journal", "persistence_strength", "REAL", "0.0"),
+        ("journal", "filter_score", "REAL", "100.0"),
+        ("journal", "position_size_mult", "REAL", "1.0"),
+        ("journal", "decision_acceleration", "REAL", "0.0"),
+        ("journal", "mode_aggressive", "REAL", "0.0"),
+        ("journal", "mode_balanced", "REAL", "1.0"),
+        ("journal", "mode_precision", "REAL", "0.0"),
+        ("journal", "confidence_breakdown", "TEXT", "''"),
+        ("journal", "belief_state", "TEXT", "'SEEKING'"),
+        ("journal", "decision_energy", "REAL", "0.0"),
+        ("journal", "commitment_score", "REAL", "0.0"),
+        ("journal", "time_pressure", "TEXT", "'normal'"),
+        
+        # signals
+        ("signals", "execution_mode", "TEXT", "'BALANCED'"),
+        ("signals", "intent_type", "TEXT", "''"),
+        ("signals", "decision_energy", "REAL", "0.0"),
+        ("signals", "position_size_mult", "REAL", "1.0"),
+        ("signals", "filter_score", "REAL", "100.0"),
+        ("signals", "intent_confidence", "REAL", "0.0"),
+        ("signals", "belief_state", "TEXT", "'SEEKING'"),
+        ("signals", "commitment_score", "REAL", "0.0"),
+        ("signals", "time_pressure", "TEXT", "'normal'"),
+        ("signals", "prediction_quality", "REAL", "50.0"),
+        
+        # decision_traces
+        ("decision_traces", "context_age", "REAL", "0.0"),
+        ("decision_traces", "execution_mode", "TEXT", "'NORMAL'"),
     ]
-    for table, col, col_type in _migrations:
+
+    for table, col, col_type, default in MIGRATIONS:
         try:
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
-            logger.info(f"Migrated {table}: added {col} column")
-        except sqlite3.OperationalError:
-            pass
+            c.execute(f"PRAGMA table_info({table})")
+            existing_cols = [row[1] for row in c.fetchall()]
+            
+            if col not in existing_cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type} DEFAULT {default}")
+                logger.info(f"✅ Migrated {table}: added column {col}")
+                
+        except sqlite3.OperationalError as e:
+            if "duplicate column" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Migration failed for {table}.{col}: {e}")
+        except Exception as e:
+            logger.warning(f"Migration error for {table}.{col}: {e}")
 
     conn.commit()
-    conn.close()
-    logger.info("Database ready (V10)")
+    logger.info("✅ Database ready (V10)")
+    
+except Exception as e:
+    logger.error(f"init_db error: {e}")
+    raise
+finally:
+    if conn:
+        conn.close()
+
+# ========== SAVE FUNCTIONS ==========
 
 def save_trace_to_db(trace: DecisionTrace):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO decision_traces 
-                 (timestamp, coin, event_type, belief_state, confidence, decision_energy,
-                  final_decision, reasons, why_not, what_changed, context_age, execution_mode)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
-              (int(trace.timestamp), trace.coin, trace.event_type, trace.belief_state,
-               trace.confidence, trace.decision_energy, trace.final_decision,
-               ", ".join(trace.reasons), ", ".join(trace.why_not), trace.what_changed,
-               trace.context_age, trace.execution_mode))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO decision_traces 
+                     (timestamp, coin, event_type, belief_state, confidence, decision_energy,
+                      final_decision, reasons, why_not, what_changed, context_age, execution_mode)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (int(trace.timestamp), trace.coin, trace.event_type, trace.belief_state,
+                   trace.confidence, trace.decision_energy, trace.final_decision,
+                   ", ".join(trace.reasons), ", ".join(trace.why_not), trace.what_changed,
+                   trace.context_age, trace.execution_mode))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"save_trace_to_db error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def log_context(ctx: ContextSnapshot):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO context_log
-                 (timestamp, shock_score, transition_prob, tension,
-                  vol_forecast, breath_bull, breath_bear, event_risk, dominance, regime)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)''',
-              (int(ctx.timestamp), ctx.shock_score, ctx.transition_prob, ctx.tension,
-               ctx.vol_forecast, ctx.breath_bull, ctx.breath_bear,
-               ctx.event_risk, ctx.dominance, ctx.regime))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO context_log
+                     (timestamp, shock_score, transition_prob, tension,
+                      vol_forecast, breath_bull, breath_bear, event_risk, dominance, regime)
+                     VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                  (int(ctx.timestamp), ctx.shock_score, ctx.transition_prob, ctx.tension,
+                   ctx.vol_forecast, ctx.breath_bull, ctx.breath_bear,
+                   ctx.event_risk, ctx.dominance, ctx.regime))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"log_context error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def log_reaction(reaction: MarketReaction):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO reaction_log
-                 (timestamp, event, expected_vol, expected_direction,
-                  actual_vol, actual_direction, actual_move, absorption, confidence)
-                 VALUES (?,?,?,?,?,?,?,?,?)''',
-              (int(reaction.timestamp), reaction.event, reaction.expected_vol,
-               reaction.expected_direction, reaction.actual_vol, reaction.actual_direction,
-               reaction.actual_move, reaction.absorption, reaction.confidence))
-    conn.commit()
-    conn.close()
-    
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO reaction_log
+                     (timestamp, event, expected_vol, expected_direction,
+                      actual_vol, actual_direction, actual_move, absorption, confidence)
+                     VALUES (?,?,?,?,?,?,?,?,?)''',
+                  (int(reaction.timestamp), reaction.event, reaction.expected_vol,
+                   reaction.expected_direction, reaction.actual_vol, reaction.actual_direction,
+                   reaction.actual_move, reaction.absorption, reaction.confidence))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"log_reaction error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 # ========== DB WRAPPER FUNCTIONS ==========
+
 def save_signal_v7(signal_id, coin, direction, score, entry, sl, tp, rr, reason, data_confidence,
                    hypothesis_thesis="", hypothesis_invalidate="", hypothesis_observe="",
                    execution_mode="BALANCED", intent_type="", decision_energy=0.0,
                    position_size_mult=1.0, filter_score=100.0, intent_confidence=0.0,
                    belief_state="SEEKING", commitment_score=0.0, time_pressure="normal",
                    prediction_quality=50.0):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO signals 
-                 (signal_id, coin, direction, score, entry_price, sl_price, tp_price, rr, reason, 
-                  timestamp, data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
-                  execution_mode, intent_type, decision_energy, position_size_mult, filter_score, 
-                  intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-              (signal_id, coin, direction, score, entry, sl, tp, rr, reason, int(time.time()),
-               data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
-               execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
-               intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO signals 
+                     (signal_id, coin, direction, score, entry_price, sl_price, tp_price, rr, reason, 
+                      timestamp, data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
+                      execution_mode, intent_type, decision_energy, position_size_mult, filter_score, 
+                      intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (signal_id, coin, direction, score, entry, sl, tp, rr, reason, int(time.time()),
+                   data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
+                   execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
+                   intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"save_signal_v7 error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def add_journal_entry_v7(coin, market_regime, volatility_regime, flow_regime,
                          belief_state, long_score, short_score, direction, final_score,
@@ -687,50 +878,70 @@ def add_journal_entry_v7(coin, market_regime, volatility_regime, flow_regime,
                          commitment_score=0.0, decision_acceleration=0.0,
                          mode_aggressive=0.0, mode_balanced=1.0, mode_precision=0.0,
                          confidence_breakdown=""):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO journal 
-                 (timestamp, coin, market_regime, volatility_regime, flow_regime, belief_state,
-                  long_score, short_score, direction, final_score, reason, negative_evidence,
-                  entropy_data, entropy_market, entropy_decision, decision_time_ms, api_latency_ms,
-                  data_confidence, executed, missed_opportunity_pnl, contribution, execution_mode,
-                  intent_type, decision_energy, position_size_mult, filter_score, rejection_strength,
-                  acceptance_strength, persistence_strength, why_not, wait_value, trigger_strength,
-                  time_pressure, commitment_score, decision_acceleration, mode_aggressive,
-                  mode_balanced, mode_precision, confidence_breakdown)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-              (int(time.time()), coin, market_regime, volatility_regime, flow_regime, belief_state,
-               long_score, short_score, direction, final_score, reason, negative_evidence,
-               entropy_data, entropy_market, entropy_decision, decision_time_ms, api_latency_ms,
-               data_confidence, 1 if executed else 0, missed_opportunity_pnl, contribution,
-               execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
-               rejection_strength, acceptance_strength, persistence_strength, why_not, wait_value,
-               trigger_strength, time_pressure, commitment_score, decision_acceleration,
-               mode_aggressive, mode_balanced, mode_precision, confidence_breakdown))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO journal 
+                     (timestamp, coin, market_regime, volatility_regime, flow_regime, belief_state,
+                      long_score, short_score, direction, final_score, reason, negative_evidence,
+                      entropy_data, entropy_market, entropy_decision, decision_time_ms, api_latency_ms,
+                      data_confidence, executed, missed_opportunity_pnl, contribution, execution_mode,
+                      intent_type, decision_energy, position_size_mult, filter_score, rejection_strength,
+                      acceptance_strength, persistence_strength, why_not, wait_value, trigger_strength,
+                      time_pressure, commitment_score, decision_acceleration, mode_aggressive,
+                      mode_balanced, mode_precision, confidence_breakdown)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (int(time.time()), coin, market_regime, volatility_regime, flow_regime, belief_state,
+                   long_score, short_score, direction, final_score, reason, negative_evidence,
+                   entropy_data, entropy_market, entropy_decision, decision_time_ms, api_latency_ms,
+                   data_confidence, 1 if executed else 0, missed_opportunity_pnl, contribution,
+                   execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
+                   rejection_strength, acceptance_strength, persistence_strength, why_not, wait_value,
+                   trigger_strength, time_pressure, commitment_score, decision_acceleration,
+                   mode_aggressive, mode_balanced, mode_precision, confidence_breakdown))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_journal_entry_v7 error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def add_prediction_quality_log(coin, signal_id, predicted_direction, actual_direction,
                                 entry_zone_accuracy, timing_quality, thesis_validated, quality_score):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO prediction_quality 
-                 (timestamp, coin, signal_id, predicted_direction, actual_direction,
-                  entry_zone_accuracy, timing_quality, thesis_validated, quality_score)
-                 VALUES (?,?,?,?,?,?,?,?,?)''',
-              (int(time.time()), coin, signal_id, predicted_direction, actual_direction,
-               entry_zone_accuracy, timing_quality, 1 if thesis_validated else 0, quality_score))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO prediction_quality 
+                     (timestamp, coin, signal_id, predicted_direction, actual_direction,
+                      entry_zone_accuracy, timing_quality, thesis_validated, quality_score)
+                     VALUES (?,?,?,?,?,?,?,?,?)''',
+                  (int(time.time()), coin, signal_id, predicted_direction, actual_direction,
+                   entry_zone_accuracy, timing_quality, 1 if thesis_validated else 0, quality_score))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_prediction_quality_log error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def add_belief_state_log(coin, state, duration_seconds, trigger):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO belief_state_log (timestamp, coin, state, duration_seconds, trigger)
-                 VALUES (?,?,?,?,?)''',
-              (int(time.time()), coin, state, duration_seconds, trigger))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO belief_state_log (timestamp, coin, state, duration_seconds, trigger)
+                     VALUES (?,?,?,?,?)''',
+                  (int(time.time()), coin, state, duration_seconds, trigger))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_belief_state_log error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def add_shadow_decision(signal_id, coin, direction, entry, sl, tp):
     with _shadow_lock:
@@ -739,13 +950,20 @@ def add_shadow_decision(signal_id, coin, direction, entry, sl, tp):
             "timestamp": time.time(), "evaluated": False, "outcome": None, "pnl": 0.0,
             "mfe": 0.0, "mae": 0.0
         }
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO shadow_decisions (signal_id, coin, direction, entry_price, sl_price, tp_price, timestamp)
-                 VALUES (?,?,?,?,?,?,?)''',
-              (signal_id, coin, direction, entry, sl, tp, int(time.time())))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO shadow_decisions (signal_id, coin, direction, entry_price, sl_price, tp_price, timestamp)
+                     VALUES (?,?,?,?,?,?,?)''',
+                  (signal_id, coin, direction, entry, sl, tp, int(time.time())))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_shadow_decision error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def update_shadow_outcome(signal_id, outcome, pnl, mfe, mae):
     with _shadow_lock:
@@ -755,58 +973,87 @@ def update_shadow_outcome(signal_id, outcome, pnl, mfe, mae):
             _shadow_decisions[signal_id]["pnl"] = pnl
             _shadow_decisions[signal_id]["mfe"] = mfe
             _shadow_decisions[signal_id]["mae"] = mae
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''UPDATE shadow_decisions SET evaluated=1, outcome=?, pnl=?, mfe=?, mae=? WHERE signal_id=?''',
-              (outcome, pnl, mfe, mae, signal_id))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''UPDATE shadow_decisions SET evaluated=1, outcome=?, pnl=?, mfe=?, mae=? WHERE signal_id=?''',
+                  (outcome, pnl, mfe, mae, signal_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"update_shadow_outcome error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def add_hypothesis_validation(signal_id, thesis, outcome, pnl, validated):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO hypothesis_validation (signal_id, thesis, outcome, pnl, validated)
-                 VALUES (?,?,?,?,?)''',
-              (signal_id, thesis, outcome, pnl, 1 if validated else 0))
-    conn.commit()
-    conn.close()
-    
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''INSERT INTO hypothesis_validation (signal_id, thesis, outcome, pnl, validated)
+                     VALUES (?,?,?,?,?)''',
+                  (signal_id, thesis, outcome, pnl, 1 if validated else 0))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"add_hypothesis_validation error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def update_signal_outcome_v7(signal_id, outcome, pnl, exit_price, mfe, mae, hypothesis_validated=None):
-    conn = db_connect()
-    c = conn.cursor()
-    if hypothesis_validated is not None:
-        c.execute('''UPDATE signals SET evaluated=1, outcome=?, pnl=?, exit_price=?, exit_time=?, 
-                     mfe=?, mae=?, hypothesis_validated=? WHERE signal_id=?''',
-                  (outcome, pnl, exit_price, int(time.time()), mfe, mae,
-                   1 if hypothesis_validated else 0, signal_id))
-    else:
-        c.execute('''UPDATE signals SET evaluated=1, outcome=?, pnl=?, exit_price=?, exit_time=?, 
-                     mfe=?, mae=? WHERE signal_id=?''',
-                  (outcome, pnl, exit_price, int(time.time()), mfe, mae, signal_id))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        if hypothesis_validated is not None:
+            c.execute('''UPDATE signals SET evaluated=1, outcome=?, pnl=?, exit_price=?, exit_time=?, 
+                         mfe=?, mae=?, hypothesis_validated=? WHERE signal_id=?''',
+                      (outcome, pnl, exit_price, int(time.time()), mfe, mae,
+                       1 if hypothesis_validated else 0, signal_id))
+        else:
+            c.execute('''UPDATE signals SET evaluated=1, outcome=?, pnl=?, exit_price=?, exit_time=?, 
+                         mfe=?, mae=? WHERE signal_id=?''',
+                      (outcome, pnl, exit_price, int(time.time()), mfe, mae, signal_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"update_signal_outcome_v7 error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_analytics() -> dict:
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''SELECT COUNT(*), SUM(CASE WHEN outcome IN ('TP_HIT','PARTIAL_WIN') THEN 1 ELSE 0 END),
-                       AVG(rr), SUM(pnl) FROM signals WHERE evaluated=1''')
-    total, wins, avg_rr, total_pnl = c.fetchone()
-    total = total or 0
-    wins = wins or 0
-    win_rate = (wins / total * 100) if total > 0 else 0
-    conn.close()
-    return {
-        "total": total,
-        "wins": wins,
-        "losses": total - wins,
-        "win_rate": round(win_rate, 1),
-        "avg_rr": round(avg_rr or 0, 2),
-        "total_pnl": round(total_pnl or 0, 2)
-    }
-    
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''SELECT COUNT(*), SUM(CASE WHEN outcome IN ('TP_HIT','PARTIAL_WIN') THEN 1 ELSE 0 END),
+                           AVG(rr), SUM(pnl) FROM signals WHERE evaluated=1''')
+        result = c.fetchone()
+        
+        total = result[0] or 0
+        wins = result[1] or 0
+        avg_rr = result[2] or 0
+        total_pnl = result[3] or 0
+        win_rate = (wins / total * 100) if total > 0 else 0
+        
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate": round(win_rate, 1),
+            "avg_rr": round(avg_rr, 2),
+            "total_pnl": round(total_pnl, 2)
+        }
+    except Exception as e:
+        logger.error(f"get_analytics error: {e}")
+        return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "avg_rr": 0, "total_pnl": 0}
+    finally:
+        if conn:
+            conn.close()
+        
 # ========== HELPERS ==========
 def fmt_price(p):
     return f"${p:,.2f}" if p >= 1000 else f"${p:,.4f}"
