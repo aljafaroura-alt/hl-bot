@@ -783,9 +783,9 @@ def update_signal_outcome_v7(signal_id, outcome, pnl, exit_price, mfe, mae, hypo
         c.execute('''UPDATE signals SET evaluated=1, outcome=?, pnl=?, exit_price=?, exit_time=?, 
                      mfe=?, mae=? WHERE signal_id=?''',
                   (outcome, pnl, exit_price, int(time.time()), mfe, mae, signal_id))
-    conn.commit()
-    conn.close()
-
+      conn.commit()
+      conn.close()
+ 
 def get_analytics() -> dict:
     conn = db_connect()
     c = conn.cursor()
