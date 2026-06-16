@@ -793,11 +793,15 @@ def get_analytics() -> dict:
                        AVG(rr), SUM(pnl) FROM signals WHERE evaluated=1''')
     total, wins, avg_rr, total_pnl = c.fetchone()
     total = total or 0
-    wins = wins or 0    win_rate = (wins / total * 100) if total > 0 else 0
+    wins = wins or 0
+    win_rate = (wins / total * 100) if total > 0 else 0
     conn.close()
     return {
-        "total": total, "wins": wins, "losses": total - wins,
-        "win_rate": round(win_rate, 1), "avg_rr": round(avg_rr or 0, 2),
+        "total": total,
+        "wins": wins,
+        "losses": total - wins,
+        "win_rate": round(win_rate, 1),
+        "avg_rr": round(avg_rr or 0, 2),
         "total_pnl": round(total_pnl or 0, 2)
     }
     
@@ -5351,7 +5355,6 @@ def is_micro_bos_down(candles_5m: List[dict]) -> bool:
     if not recent_highs:
         return False
     return float(candles_5m[-1]['c']) < max(recent_highs) * 0.998
-
 # ========== MAIN ==========
 if __name__ == "__main__":
     args = parse_args()
@@ -5384,21 +5387,20 @@ if __name__ == "__main__":
                 _bot_health["state"] = BotHealthState.HEALTHY
                 _bot_health["failures"] = 0
                 _bot_health["reason"] = ""
-except Exception as e:
-    if not RUNTIME.is_running():
-        break
-    poll_failures += 1
-    backoff = min(60, poll_failures * 5)
-    with _bot_health_lock:
-        _bot_health["failures"] = poll_failures
-        _bot_health["last_failure"] = time.time()
-        _bot_health["reason"] = str(e)
-        if poll_failures >= 10:
-            _bot_health["state"] = BotHealthState.FAILED
-        elif poll_failures >= 5:
-            _bot_health["state"] = BotHealthState.DEGRADED
-        else:
-            _bot_health["state"] = BotHealthState.RECOVERY
-    logger.error(f"Bot polling error (fail#{poll_failures}): {e}, retry in {backoff}s")
-    time.sleep(backoff)
-        
+        except Exception as e:
+            if not RUNTIME.is_running():
+                break
+            poll_failures += 1
+            backoff = min(60, poll_failures * 5)
+            with _bot_health_lock:
+                _bot_health["failures"] = poll_failures
+                _bot_health["last_failure"] = time.time()
+                _bot_health["reason"] = str(e)
+                if poll_failures >= 10:
+                    _bot_health["state"] = BotHealthState.FAILED
+                elif poll_failures >= 5:
+                    _bot_health["state"] = BotHealthState.DEGRADED
+                else:
+                    _bot_health["state"] = BotHealthState.RECOVERY
+            logger.error(f"Bot polling error (fail#{poll_failures}): {e}, retry in {backoff}s")
+            time.sleep(backoff)
