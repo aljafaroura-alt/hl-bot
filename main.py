@@ -3477,6 +3477,20 @@ def log_snapshot_metrics():
             logger.warning(f"⚠️ High discovery ratio: {metrics['discovery_ratio']:.2f} (too many shadows)")
 
         RUNTIME.wait(1800)
+
+def compute_surprise_index(coin: str, expected_move: float, actual_move: float) -> float:
+    if expected_move <= 0:
+        return 0.0
+    ratio = abs(actual_move) / expected_move
+    if ratio < 0.8:
+        return 0.0
+    return min(100, (ratio - 0.8) * 100)
+
+def update_intent_timeline(coin: str, intent: str):
+    with _intent_timeline_lock:
+        if coin not in _intent_timeline:
+            _intent_timeline[coin] = deque(maxlen=20)
+        _intent_timeline[coin].append((intent, time.time()))
     
 # ============================================================
 # PART 26 – EXECUTION MODE BLEND + FATIGUE + FILTER GRADIENT
@@ -3711,7 +3725,7 @@ def compute_filter_score(rejection: float, acceptance: float, persistence: float
                           volatility_regime: str, market_regime: str) -> float:
     weights = get_filter_weights(volatility_regime, market_regime)
     return min(100.0, rejection * weights["rejection"] + acceptance * weights["acceptance"] + persistence * weights["persistence"])
-    
+
 # ============================================================
 # PART 27 – INTENT ENGINE + WHY NOT + POSITION SIZE + THESIS GENERATOR
 # ============================================================
@@ -4807,12 +4821,11 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         confidence_data["score_short"],
         context.transition_prob
     )
-    if clarity["decision_quality"] < 0.6:   # threshold, bisa disesuaikan
+    if clarity["decision_quality"] < 0.6:
         logger.debug(f"{coin}: low clarity {clarity['decision_quality']:.2f} (dominant: {clarity['dominant_factor']}), skipping")
         update_fatigue_memory(event.type)
         return None
 
-    # Simpan clarity untuk log
     confidence_data["clarity"] = clarity
 
     # ===== V10: EVENT RISK ADJUSTMENT =====
@@ -4902,13 +4915,13 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     if breath_v10.get("rotation", 0) > 1 and coin not in ["BTC", "ETH"]:
         position_size_mult *= 1.15
 
-    # Legacy breath filter (tetap jalan)
+    # Legacy breath filter
     if context.breath_bull < TUNABLE["BREATH_WEAK_THRESHOLD"] and coin != "BTC" and event.direction == "LONG":
         position_size_mult *= 0.6
     if context.breath_bear < TUNABLE["BREATH_WEAK_THRESHOLD"] and coin != "BTC" and event.direction == "SHORT":
         position_size_mult *= 0.6
 
-    # ===== EXECUTION MODE BLEND (V7) =====
+    # ===== EXECUTION MODE BLEND =====
     if context.shock_score > TUNABLE["SHOCK_AGGRESSIVE_THRESHOLD"] and exec_mode != ExecutionMode.DEFENSIVE:
         blend_weights = {"aggressive": 1.0, "balanced": 0.0, "precision": 0.0}
     else:
@@ -4945,14 +4958,6 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         confidence_data["decision_energy"], wait_value, confidence_data["decision_energy"]
     )
 
-    # ===== THRESHOLD CHECK =====
-    if confidence_data["final_score"] < final_threshold:
-        if position_size_mult > 0.3:
-            position_size_mult = max(0.15, position_size_mult * 0.7)
-        else:
-            update_fatigue_memory(event.type)
-            return None
-
     # ===== GENERATE THESIS =====
     thesis_obj = generate_thesis_from_event_v7(coin, event, mark, thesis_data["market_state"], intent, belief)
 
@@ -4982,6 +4987,101 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
 
     signal_id = generate_signal_id(coin, event.direction)
     eval_delay = get_evaluation_delay(thesis_data["atr_pct"], confidence_data["rr"], thesis_data["market_regime"])
+
+    # ===== ADVANCED METRICS =====
+    candles_5m = get_candles(coin, "5m", 20, thesis_data["master_candles"])
+    delta_history = list(_rolling_delta.get(coin, []))[-5:]
+    oi_history = [v for ts, v in _oi_history.get(coin, [])[-5:]]
+    hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
+
+    micro_acc = compute_micro_acceptance(coin, event, candles_5m) if candles_5m else {"score": None, "status": "INSUFFICIENT"}
+
+    clarity_str = "UNCLEAR" if confidence_data["entropy_market"] > 50 else "CLEAR"
+    failed_risk = get_failed_move_risk(
+        coin, event.type, thesis_data["delta"], thesis_data["vol_spike"],
+        clarity_str, intent.value, event.direction, mark
+    )
+
+    intent_drift = compute_intent_drift(coin)
+
+    expected_move = thesis_data.get("atr_pct", 0.5)
+    actual_move = thesis_data["vol_spike"] * 0.5
+    surprise = compute_surprise_index(coin, expected_move, actual_move)
+
+    update_intent_vector(coin, event, thesis_data["delta"], thesis_data["vol_spike"],
+                         micro_acc.get("score", 50), context)
+
+    update_intent_timeline(coin, intent.value)
+
+    # ===== DISCOVERY / OBSERVE MODE =====
+    allow_entry = True
+    if intent_drift > 0.7:
+        mode_override = "DISCOVERY"
+        final_threshold = int(final_threshold * 1.3)
+        position_size_mult *= 0.3
+        allow_entry = False
+        why_not += " | DISCOVERY mode: high intent drift, observing only"
+    elif intent_drift > 0.5:
+        mode_override = "OBSERVE"
+        final_threshold = int(final_threshold * 1.1)
+        position_size_mult *= 0.7
+        why_not += " | OBSERVE mode: moderate drift, reduced size"
+    else:
+        mode_override = None
+
+    # ===== THRESHOLD CHECK =====
+    if confidence_data["final_score"] < final_threshold:
+        if position_size_mult > 0.3:
+            position_size_mult = max(0.15, position_size_mult * 0.7)
+        else:
+            update_fatigue_memory(event.type)
+            return None
+
+    # If DISCOVERY mode, still log but don't execute
+    if not allow_entry:
+        shadow_result = {
+            "executed": False,
+            "mode": "DISCOVERY",
+            "shadow": True,
+            "coin": coin,
+            "direction": event.direction,
+            "entry": mark,
+            "sl": confidence_data["sl"],
+            "tp": confidence_data["tp"],
+            "rr": confidence_data["rr"],
+            "score": confidence_data["final_score"],
+            "area": event.type,
+            "label": "🔍 DISCOVERY",
+            "why_not": why_not,
+            "hypothesis": thesis_obj,
+            "context_age": context_age,
+        }
+        journal_entry = DecisionJournalEntry(
+            timestamp=time.time(),
+            coin=coin,
+            event_type=event.type,
+            direction=event.direction,
+            score=confidence_data["final_score"],
+            mode="DISCOVERY",
+            executed=False,
+            shadow=True,
+            entry=mark,
+            sl=confidence_data["sl"],
+            tp=confidence_data["tp"],
+            rr=confidence_data["rr"],
+            intent=intent.value,
+            belief=belief.value,
+            decision_energy=confidence_data["decision_energy"],
+            hidden_liquidity=hl.get("score", 0),
+            micro_acceptance=micro_acc.get("score"),
+            failed_risk=failed_risk.get("risk", 1.0),
+            intent_drift=intent_drift,
+            surprise=surprise,
+            narrative={}
+        )
+        log_decision_journal(journal_entry)
+        auto_review()
+        return shadow_result
 
     # ===== SAVE =====
     if not PAPER_MODE:
@@ -5045,92 +5145,17 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         exec_mode, intent_success
     )
     explanation += f"\n🧼 *Clarity*: {clarity['decision_quality']:.2f} (dom: {clarity['dominant_factor']})"
-    # ===== ADVANCED METRICS =====
-    # Hidden liquidity
-    candles_5m = get_candles(coin, "5m", 20, thesis_data["master_candles"])
-    delta_history = list(_rolling_delta.get(coin, []))[-5:]
-    oi_history = [v for ts, v in _oi_history.get(coin, [])[-5:]]
-    hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
 
-    # Micro acceptance
-    micro_acc = compute_micro_acceptance(coin, event, candles_5m) if candles_5m else {"score": None, "status": "INSUFFICIENT"}
-
-    # Failed move risk
-    clarity_str = "UNCLEAR" if confidence_data["entropy_market"] > 50 else "CLEAR"
-    failed_risk = get_failed_move_risk(
-    coin, event.type, thesis_data["delta"], thesis_data["vol_spike"],
-    clarity_str, intent.value, event.direction, mark
-    )
-
-    # Intent drift
-    intent_drift = compute_intent_drift(coin)
-
-    # Surprise
-    expected_move = thesis_data.get("atr_pct", 0.5)
-    actual_move = thesis_data["vol_spike"] * 0.5
-    surprise = compute_surprise_index(coin, expected_move, actual_move)
-
-    # Update intent vector
-    update_intent_vector(coin, event, thesis_data["delta"], thesis_data["vol_spike"],
-                         micro_acc.get("score", 50), context)
-
-    # Update intent timeline
-    update_intent_timeline(coin, intent.value)
-
-    # ===== DISCOVERY / OBSERVE MODE =====
-    allow_entry = True
-    if intent_drift > 0.7:
-        mode_override = "DISCOVERY"
-        final_threshold = int(final_threshold * 1.3)
-        position_size_mult *= 0.3
-        allow_entry = False
-        why_not += " | DISCOVERY mode: high intent drift, observing only"
-    elif intent_drift > 0.5:
-        mode_override = "OBSERVE"
-        final_threshold = int(final_threshold * 1.1)
-        position_size_mult *= 0.7
-        why_not += " | OBSERVE mode: moderate drift, reduced size"
-    else:
-        mode_override = None
-        # ===== THRESHOLD CHECK =====
-if confidence_data["final_score"] < final_threshold:
-    if position_size_mult > 0.3:
-        position_size_mult = max(0.15, position_size_mult * 0.7)
-    else:
-        update_fatigue_memory(event.type)
-        return None
-
-# If DISCOVERY mode, still log but don't execute
-if not allow_entry:
-    # Build shadow result
-    shadow_result = {
-        "executed": False,
-        "mode": "DISCOVERY",
-        "shadow": True,
-        "coin": coin,
-        "direction": event.direction,
-        "entry": mark,
-        "sl": confidence_data["sl"],
-        "tp": confidence_data["tp"],
-        "rr": confidence_data["rr"],
-        "score": confidence_data["final_score"],
-        "area": event.type,
-        "label": "🔍 DISCOVERY",
-        "why_not": why_not,
-        "hypothesis": thesis_obj,
-        "context_age": context_age,
-        # ... tambahkan field lain sesuai kebutuhan
-    }
-    # Log journal for shadow
+    # ===== LOG JOURNAL =====
     journal_entry = DecisionJournalEntry(
         timestamp=time.time(),
         coin=coin,
         event_type=event.type,
         direction=event.direction,
         score=confidence_data["final_score"],
-        mode="DISCOVERY",
-        executed=False,
-        shadow=True,
+        mode=execution_mode_str,
+        executed=True,
+        shadow=False,
         entry=mark,
         sl=confidence_data["sl"],
         tp=confidence_data["tp"],
@@ -5147,39 +5172,18 @@ if not allow_entry:
     )
     log_decision_journal(journal_entry)
     auto_review()
-    return shadow_result
-    # ===== LOG JOURNAL =====
-journal_entry = DecisionJournalEntry(
-    timestamp=time.time(),
-    coin=coin,
-    event_type=event.type,
-    direction=event.direction,
-    score=confidence_data["final_score"],
-    mode=execution_mode_str,
-    executed=True,
-    shadow=False,
-    entry=mark,
-    sl=confidence_data["sl"],
-    tp=confidence_data["tp"],
-    rr=confidence_data["rr"],
-    intent=intent.value,
-    belief=belief.value,
-    decision_energy=confidence_data["decision_energy"],
-    hidden_liquidity=hl.get("score", 0),
-    micro_acceptance=micro_acc.get("score"),
-    failed_risk=failed_risk.get("risk", 1.0),
-    intent_drift=intent_drift,
-    surprise=surprise,
-    narrative={}
-)
-log_decision_journal(journal_entry)
-auto_review()
-    
+
     # ===== RETURN RESULT =====
     return {
-        "coin": coin, "direction": event.direction, "score": confidence_data["final_score"],
-        "entry": mark, "sl": confidence_data["sl"], "tp": confidence_data["tp"],
-        "rr": confidence_data["rr"], "reason": reason, "area": event.type,
+        "coin": coin,
+        "direction": event.direction,
+        "score": confidence_data["final_score"],
+        "entry": mark,
+        "sl": confidence_data["sl"],
+        "tp": confidence_data["tp"],
+        "rr": confidence_data["rr"],
+        "reason": reason,
+        "area": event.type,
         "label": get_confidence_label(confidence_data["final_score"]),
         "contradiction": confidence_data["contradiction"],
         "exhaustion": confidence_data["exhaustion"],
@@ -5227,17 +5231,16 @@ auto_review()
         "clarity_quality": clarity["decision_quality"],
         "clarity_dominant_factor": clarity["dominant_factor"],
         "clarity_reasons": ", ".join(clarity["reasons"][:3]),
-        "explanation": explanation
+        "explanation": explanation,
         "hidden_liquidity": hl.get("score", 0),
-"hidden_side": hl.get("side", "NONE"),
-"micro_acceptance": micro_acc.get("score"),
-"micro_acceptance_status": micro_acc.get("status"),
-"failed_risk": failed_risk.get("risk", 1.0),
-"failed_reason": failed_risk.get("reason"),
-"intent_drift": intent_drift,
-"surprise": surprise,
-    }
-    
+        "hidden_side": hl.get("side", "NONE"),
+        "micro_acceptance": micro_acc.get("score"),
+        "micro_acceptance_status": micro_acc.get("status"),
+        "failed_risk": failed_risk.get("risk", 1.0),
+        "failed_reason": failed_risk.get("reason"),
+        "intent_drift": intent_drift,
+        "surprise": surprise,
+    } 
 # ============================================================
 # PART 35 – CHECK ENTRY V10 + GLOBAL MARKET INTENT + EVALUATE SIGNAL
 # ============================================================
@@ -6840,6 +6843,64 @@ def cmd_intel(m):
 └─ Consistency > 70%: DE berkorelasi dengan outcome
 """
     bot.reply_to(m, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['debug'])
+def cmd_debug(m):
+    parts = m.text.split()
+    coin = parts[1].upper() if len(parts) > 1 else "BTC"
+
+    try:
+        snapshot = get_snapshot()
+        mark = snapshot.mids.get(coin, 0) if snapshot else 0
+        if mark == 0:
+            bot.reply_to(m, f"❌ {coin} not found")
+            return
+
+        context = get_context_snapshot(coin)
+        breath = compute_market_breath_v10()
+        reaction = get_current_reaction()
+
+        with _journal_lock:
+            recent = [e for e in _decision_journal if e.coin == coin]
+            last = recent[-1] if recent else None
+
+        drift = compute_intent_drift(coin)
+
+        master = {coin: get_candles(coin, "1h", 100)}
+        candles_5m = get_candles(coin, "5m", 20, master)
+        delta_history = list(_rolling_delta.get(coin, []))[-5:]
+        oi_history = [v for ts, v in _oi_history.get(coin, [])[-5:]]
+        hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
+
+        text = f"🔍 *DEBUG* ({coin})\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        text += f"💰 Price: {fmt_price(mark)}\n"
+        text += f"📊 Regime: {context.regime} | Shock: {context.shock_score:.0f}%\n"
+        text += f"🔄 Transition: {context.transition_prob:.0f}% | Tension: {context.tension:.0f}%\n"
+        text += f"🌍 Breath: Bull {breath['bull']*100:.0f}% | Part {breath['participation']*100:.0f}%\n"
+
+        if last:
+            text += f"\n📝 *Last Decision*\n"
+            text += f"├─ Mode: {last.mode} | Score: {last.score}\n"
+            text += f"├─ Intent: {last.intent} | Belief: {last.belief}\n"
+            text += f"├─ Drift: {last.intent_drift:.2f}\n"
+            text += f"├─ Executed: {'✅' if last.executed else '❌'}\n"
+            if last.outcome:
+                text += f"└─ Outcome: {last.outcome} | PnL: {last.pnl:+.2f}%\n"
+            else:
+                text += f"└─ Status: ⏳ PENDING\n"
+
+        text += f"\n🧊 *Hidden Liquidity*: {hl['score']}% ({hl['side']})\n"
+        text += f"📊 *Intent Drift*: {drift:.2f}\n"
+        text += f"⚡ *Reaction*: {reaction.event if reaction else 'None'}\n"
+
+        event_adj = get_event_risk_adjustment()
+        if event_adj.get("importance", 0) > 20:
+            text += f"📅 *Event Risk*: {event_adj['importance']:.0f}% | Bias: {event_adj['bias']:+.0f}\n"
+
+        bot.reply_to(m, text, parse_mode='Markdown')
+
+    except Exception as e:
+        bot.reply_to(m, f"Error: {e}")
     
 
 # ============================================================
@@ -7027,14 +7088,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
 
     threads = [
-        threading.Thread(target=scheduled_state_engine_v10, daemon=True),
-        threading.Thread(target=scheduled_trigger_engine_v7, daemon=True),
-        threading.Thread(target=scheduled_shadow_evaluation_v7, daemon=True),
-        threading.Thread(target=scheduled_cleanup_v7, daemon=True),
-        threading.Thread(target=monitor_pending_setups_v6, daemon=True),
-        threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
-        threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
-        threads = [
     threading.Thread(target=scheduled_state_engine_v10, daemon=True),
     threading.Thread(target=scheduled_trigger_engine_v7, daemon=True),
     threading.Thread(target=scheduled_shadow_evaluation_v7, daemon=True),
@@ -7042,8 +7095,7 @@ if __name__ == "__main__":
     threading.Thread(target=monitor_pending_setups_v6, daemon=True),
     threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
     threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
-    threading.Thread(target=log_snapshot_metrics, daemon=True, name="metrics_logger"),  # NEW
-    ]
+    threading.Thread(target=log_snapshot_metrics, daemon=True, name="metrics_logger"),
     ]
     for t in threads:
         t.start()
