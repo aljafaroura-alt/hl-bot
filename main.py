@@ -651,7 +651,6 @@ _bot_health: Dict[str, Any] = {
     "reason": ""
 }
 _bot_health_lock = threading.RLock()
-
 # V10: DB write queue (async DB writes)
 from queue import Queue as _Queue
 _db_queue: "_Queue[tuple]" = _Queue(maxsize=2000)
@@ -701,6 +700,9 @@ _intent_timeline: Dict[str, deque] = {}
 _intent_timeline_lock = threading.RLock()
 _intent_vector_history: Dict[str, deque] = {}
 _intent_vector_lock = threading.RLock()
+_regimes_cache: Dict[str, Any] = {}
+_regimes_cache_lock = threading.RLock()
+_REGIMES_TTL = 120
 
 # Hyperliquid API
 info = Info(constants.MAINNET_API_URL)
@@ -712,7 +714,6 @@ try:
 except ImportError:
     HAS_PSUTIL = False
     
-# ========== DATABASE ==========
 # ============================================================
 # PART 10 – DATABASE + JOURNAL (FULL V10)
 # ============================================================
@@ -2196,9 +2197,6 @@ def get_funding_pct(coin: str) -> float:
     return 0.0
     
 # ========== REGIMES ==========
-_regimes_cache: Dict[str, Any] = {}
-_regimes_cache_lock = threading.RLock()
-_REGIMES_TTL = 120
 
 def get_market_regime() -> str:
     candles = get_candles("BTC", "4h", 50)
@@ -3354,11 +3352,11 @@ def log_decision_journal(entry: DecisionJournalEntry):
     with _journal_lock:
         _decision_journal.append(entry)
         if len(_decision_journal) > 2000:
-            _decision_journal = _decision_journal[-2000:]
-
+            _decision_journal = list(_decision_journal)[-2000:] 
+            
 def get_decision_journal(coin: str = None, mode: str = None, limit: int = 100) -> List[DecisionJournalEntry]:
     with _journal_lock:
-        result = _decision_journal
+        result = list(_decision_journal)  
         if coin:
             result = [e for e in result if e.coin == coin]
         if mode:
@@ -3373,7 +3371,7 @@ def auto_review():
             return
 
     with _journal_lock:
-        entries = _decision_journal[-50:]
+        entries = list(_decision_journal)[-50:]
 
     if len(entries) < 20:
         return
@@ -3444,7 +3442,7 @@ def snapshot_metrics() -> Dict[str, Any]:
         avg_drift = np.mean(list(_smoothed_drift.values())) if _smoothed_drift else 0.0
 
     with _journal_lock:
-        recent = _decision_journal[-100:]
+        recent = list(_decision_journal)[-100:]
         if recent:
             shadows = sum(1 for e in recent if not e.executed)
             discovery_ratio = shadows / len(recent)
@@ -6749,7 +6747,7 @@ def cmd_health(m):
     with _hypothesis_lock: hyp_sz = len(_hypothesis_store)
     with _trace_lock:
         trace_sz = len(_decision_traces)
-        last_trace = _decision_traces[-1] if _decision_traces else None
+        last_trace =list( _decision_traces)[-1] if _decision_traces else None
     ctx = get_context_snapshot("BTC")
     now = time.time()
     with _snapshot_lock:
@@ -6861,10 +6859,9 @@ def cmd_debug(m):
         reaction = get_current_reaction()
 
         with _journal_lock:
-            recent = [e for e in _decision_journal if e.coin == coin]
+            recent = [e for e in list(_decision_journal) if e.coin == coin]  
             last = recent[-1] if recent else None
-
-        drift = compute_intent_drift(coin)
+            drift = compute_intent_drift(coin)
 
         master = {coin: get_candles(coin, "1h", 100)}
         candles_5m = get_candles(coin, "5m", 20, master)
