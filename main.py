@@ -18,6 +18,7 @@ import logging.handlers
 import argparse
 import json
 import math
+import traceback
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
@@ -6858,15 +6859,28 @@ def cmd_debug(m):
         breath = compute_market_breath_v10()
         reaction = get_current_reaction()
 
+        # AMANKAN SEMUA DEQUE -> LIST SEBELUM SLICE
+        delta_raw = _rolling_delta.get(coin, deque())
+        oi_raw = _oi_history.get(coin, deque())
+
+        # Konversi ke list
+        delta_hist = list(delta_raw)
+        oi_hist = list(oi_raw)
+
+        # Slicing aman karena sudah list
+        delta_history = delta_hist[-5:] if delta_hist else []
+        oi_history = [v for ts, v in oi_hist[-5:]] if oi_hist else []
+
+        # Pastikan _decision_journal juga list
         with _journal_lock:
-            recent = [e for e in list(_decision_journal) if e.coin == coin]  
+            recent = [e for e in list(_decision_journal) if e.coin == coin]
             last = recent[-1] if recent else None
-            drift = compute_intent_drift(coin)
+
+        drift = compute_intent_drift(coin)
 
         master = {coin: get_candles(coin, "1h", 100)}
         candles_5m = get_candles(coin, "5m", 20, master)
-        delta_history = list(_rolling_delta.get(coin, []))[-5:]
-        oi_history = [v for ts, v in _oi_history.get(coin, [])[-5:]]
+
         hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
 
         text = f"🔍 *DEBUG* ({coin})\n━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6897,7 +6911,12 @@ def cmd_debug(m):
         bot.reply_to(m, text, parse_mode='Markdown')
 
     except Exception as e:
-        bot.reply_to(m, f"Error: {e}")
+        # Kirim traceback ke user biar keliatan line exact
+        tb = traceback.format_exc()
+        # Potong kalau kepanjangan (max 4000 chars)
+        if len(tb) > 4000:
+            tb = tb[-4000:]
+        bot.reply_to(m, f"❌ *Error*\n```\n{tb}\n```", parse_mode='Markdown')
     
 
 # ============================================================
