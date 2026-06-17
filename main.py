@@ -3155,38 +3155,78 @@ def get_failed_move_risk(coin, event_type, delta, vol_spike, clarity, intent, di
                 return {"risk": 0.9, "reason": best_reason or "similar failed setup (price distant)"}
         return {"risk": 1.0, "reason": None}
 
-def compute_hidden_liquidity(coin: str, candles_5m: List[dict], delta_history: List[float],
-                              oi_history: List[float]) -> Dict[str, Any]:
-    if len(candles_5m) < 6 or len(delta_history) < 5:
-        return {"score": 0, "side": "NONE", "persistence": 0}
+def compute_hidden_liquidity(coin: str, candles_5m: list, delta_history: list,
+                              oi_history: list) -> dict:
+    """
+    Soft-scoring hidden liquidity detector dengan confidence weighting.
+    Returns score 0-100, side (NONE/POSSIBLE/ABSORBING), breakdown, confidence.
+    """
+    result = {
+        "score": 0,
+        "side": "NONE",
+        "persistence": 0,
+        "eff_score": 0.0,
+        "vol_score": 0.0,
+        "persist_score": 0.0,
+        "oi_score": 0.0,
+        "confidence": 0.0,
+    }
 
+    # ===== DATA SUFFICIENCY =====
+    delta_count = len(delta_history)
+    oi_count = len(oi_history)
+    candle_count = len(candles_5m) if candles_5m else 0
+
+    # Coverage: berapa banyak data yang tersedia
+    coverage = (
+        min(1.0, delta_count / 5) *
+        min(1.0, oi_count / 5) *
+        min(1.0, candle_count / 20)
+    )
+    result["confidence"] = round(coverage, 2)
+
+    if candle_count < 6 or delta_count < 3 or oi_count < 3:
+        return result
+
+    # ===== PRICE MOVE =====
     prices = [float(c['c']) for c in candles_5m[-5:]]
     price_move_pct = abs(prices[-1] - prices[-5]) / max(prices[-5], 0.01) * 100
 
+    # ===== NORMALIZED DELTA =====
     vols = [float(c['v']) * float(c['c']) for c in candles_5m[-5:]]
     delta_abs_sum = sum(abs(d) for d in delta_history[-5:])
     vol_median = np.median(vols) if vols else 1.0
     if vol_median == 0:
-        return {"score": 0, "side": "NONE", "persistence": 0}
+        return result
     delta_norm = delta_abs_sum / (vol_median * len(vols))
     delta_norm = np.clip(delta_norm, 0.002, 0.1)
 
+    # ===== EFFICIENCY SCORE (soft) =====
     efficiency = price_move_pct / max(delta_norm, 0.001)
-    if efficiency > 0.3:
-        return {"score": 0, "side": "NONE", "persistence": 0}
+    eff_score = max(0.0, min(1.0, (0.5 - efficiency) / 0.5))
+    result["eff_score"] = eff_score
 
+    # ===== VOLUME SCORE (soft) =====
     avg_vol = sum(vols[:-1]) / max(1, len(vols)-1)
-    vol_ratio = vols[-1] / max(avg_vol, 0.01)
-    if vol_ratio < 1.5:
-        return {"score": 0, "side": "NONE", "persistence": 0}
+    if avg_vol == 0:
+        return result
+    vol_ratio = vols[-1] / avg_vol
+    vol_score = max(0.0, min(1.0, (vol_ratio - 1.1) / 1.2))
+    result["vol_score"] = vol_score
 
+    # ===== OI SCORE =====
     oi_start = oi_history[-5] if len(oi_history) >= 5 else oi_history[-1]
     oi_end = oi_history[-1]
     oi_trend = (oi_end - oi_start) / max(oi_start, 0.01) * 100 if oi_start > 0 else 0
-    oi_component = max(0, 20 - abs(oi_trend) * 2)
+    oi_score = max(0.0, min(1.0, 1.0 - abs(oi_trend) / 10))
+    result["oi_score"] = oi_score
+
+    # ===== PERSISTENCE (decayed, not linear) =====
+    atr_pct = get_atr_pct(coin, 14, "5m", None) if candle_count >= 20 else 0.5
+    move_limit = max(0.08, atr_pct * 0.5)
 
     persistence = 0
-    for i in range(1, min(6, len(candles_5m))):
+    for i in range(1, min(6, candle_count)):
         sub_prices = [float(c['c']) for c in candles_5m[-i-1:]]
         sub_move = abs(sub_prices[-1] - sub_prices[0]) / max(sub_prices[0], 0.01) * 100
         sub_vols = [float(c['v']) * float(c['c']) for c in candles_5m[-i-1:]]
@@ -3194,21 +3234,47 @@ def compute_hidden_liquidity(coin: str, candles_5m: List[dict], delta_history: L
         if sub_avg == 0:
             continue
         sub_vol_ratio = sub_vols[-1] / sub_avg
-        if sub_move < 0.3 and sub_vol_ratio > 1.2:
+        if sub_move < move_limit and sub_vol_ratio > 1.2:
             persistence += 1
         else:
             break
 
-    delta_side = "BUYER" if delta_history[-1] > 0 else "SELLER"
-    score = (
-        35 * max(0, min(1, 1 - efficiency)) +
-        25 * np.log1p(vol_ratio) +
-        20 * min(1, persistence / 3) +
-        20 * (oi_component / 20)
+    # Decayed persistence: 1 candle = 0.5, 2 = 0.8, 3+ = 1.0
+    if persistence >= 3:
+        persist_score = 1.0
+    elif persistence >= 2:
+        persist_score = 0.8
+    elif persistence >= 1:
+        persist_score = 0.5
+    else:
+        persist_score = 0.0
+    result["persist_score"] = persist_score
+    result["persistence"] = persistence
+
+    # ===== RAW SCORE =====
+    raw_score = (
+        35 * eff_score +
+        25 * vol_score +
+        20 * persist_score +
+        20 * oi_score
     )
-    score = min(100, int(score))
-    side = f"{delta_side}_ABSORBING" if score > 30 else "NONE"
-    return {"score": int(score), "side": side, "persistence": persistence}
+
+    # ===== APPLY CONFIDENCE WEIGHT =====
+    # Kalau coverage rendah, diskon score
+    weighted_score = raw_score * coverage
+    score = min(100, int(weighted_score))
+    result["score"] = score
+
+    # ===== SIDE (tiered, not binary) =====
+    if score >= 60:
+        delta_side = "BUYER" if delta_history[-1] > 0 else "SELLER"
+        result["side"] = f"{delta_side}_ABSORBING"
+    elif score >= 35:
+        result["side"] = "POSSIBLE_ABSORPTION"
+    else:
+        result["side"] = "NONE"
+
+    return result
 
 def compute_micro_acceptance(coin: str, event: TradeEvent, candles_5m: List[dict]) -> Dict[str, Any]:
     if not candles_5m or len(candles_5m) < 5:
@@ -6845,6 +6911,7 @@ def cmd_intel(m):
 
 @bot.message_handler(commands=['debug'])
 def cmd_debug(m):
+    import traceback
     parts = m.text.split()
     coin = parts[1].upper() if len(parts) > 1 else "BTC"
 
@@ -6859,38 +6926,93 @@ def cmd_debug(m):
         breath = compute_market_breath_v10()
         reaction = get_current_reaction()
 
-        # AMANKAN SEMUA DEQUE -> LIST SEBELUM SLICE
+        # ===== DATA BUFFER =====
         delta_raw = _rolling_delta.get(coin, deque())
         oi_raw = _oi_history.get(coin, deque())
 
-        # Konversi ke list
         delta_hist = list(delta_raw)
         oi_hist = list(oi_raw)
 
-        # Slicing aman karena sudah list
         delta_history = delta_hist[-5:] if delta_hist else []
         oi_history = [v for ts, v in oi_hist[-5:]] if oi_hist else []
 
-        # Pastikan _decision_journal juga list
+        # ===== LAST DECISION =====
         with _journal_lock:
             recent = [e for e in list(_decision_journal) if e.coin == coin]
             last = recent[-1] if recent else None
 
+        # ===== INTENT DRIFT =====
         drift = compute_intent_drift(coin)
+        with _intent_vector_lock:
+            vec_history = _intent_vector_history.get(coin, deque())
+            vec_count = len(vec_history)
 
+        # ===== EVENT RISK =====
+        with _event_risk_lock:
+            event_active = len(_EVENT_RISK_DATA) > 0
+            event_count = len(_EVENT_RISK_DATA)
+
+        # ===== CANDLES + HIDDEN LIQUIDITY =====
         master = {coin: get_candles(coin, "1h", 100)}
         candles_5m = get_candles(coin, "5m", 20, master)
 
-        hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
+        hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {
+            "score": 0, "side": "NONE", "eff_score": 0, "vol_score": 0,
+            "persist_score": 0, "oi_score": 0, "confidence": 0
+        }
 
+        # ===== CLAMP SHOCK =====
+        shock_display = max(0.0, min(100.0, context.shock_score))
+
+        # ===== BUILD OUTPUT =====
         text = f"🔍 *DEBUG* ({coin})\n━━━━━━━━━━━━━━━━━━━━━━\n"
         text += f"💰 Price: {fmt_price(mark)}\n"
-        text += f"📊 Regime: {context.regime} | Shock: {context.shock_score:.0f}%\n"
+        text += f"📊 Regime: {context.regime} | Shock: {shock_display:.0f}%\n"
         text += f"🔄 Transition: {context.transition_prob:.0f}% | Tension: {context.tension:.0f}%\n"
         text += f"🌍 Breath: Bull {breath['bull']*100:.0f}% | Part {breath['participation']*100:.0f}%\n"
 
+        # ===== HIDDEN LIQUIDITY =====
+        text += f"\n🧊 *Hidden Liquidity*: {hl['score']}% ({hl['side']})\n"
+        text += f"   ├─ Inputs: delta={len(delta_history)}/5, oi={len(oi_history)}/5, candles={len(candles_5m) if candles_5m else 0}\n"
+        text += f"   ├─ Breakdown: eff={hl.get('eff_score',0):.2f} | vol={hl.get('vol_score',0):.2f} | persist={hl.get('persist_score',0):.2f} | oi={hl.get('oi_score',0):.2f}\n"
+        text += f"   ├─ Confidence: {hl.get('confidence',0)*100:.0f}%\n"
+
+        if hl['score'] >= 60:
+            text += f"   └─ Status: 🔴 HIGH (ABSORBING)"
+        elif hl['score'] >= 35:
+            text += f"   └─ Status: 🟡 MODERATE (POSSIBLE)"
+        elif hl['score'] > 0:
+            text += f"   └─ Status: ⚪ LOW (needs more data)"
+        else:
+            components = [
+                ("eff", hl.get('eff_score',0)),
+                ("vol", hl.get('vol_score',0)),
+                ("persist", hl.get('persist_score',0)),
+                ("oi", hl.get('oi_score',0)),
+            ]
+            weakest = min(components, key=lambda x: x[1])
+            if hl.get('confidence', 0) < 0.5:
+                text += f"   └─ Status: ⏸️ INSUFFICIENT DATA (conf={hl.get('confidence',0)*100:.0f}%)"
+            else:
+                text += f"   └─ Status: ⏸️ LOW ({weakest[0]}={weakest[1]:.2f} weakest)"
+
+        # ===== INTENT DRIFT =====
+        text += f"\n📊 *Intent Drift*: {drift:.2f} (history: {vec_count}/4 min)"
+        if vec_count < 4:
+            text += " ⏳ waiting for more data"
+
+        # ===== REACTION =====
+        if reaction:
+            text += f"\n⚡ *Reaction*: {reaction.event} | Absorption: {reaction.absorption*100:.0f}% | Conf: {reaction.confidence*100:.0f}%"
+        else:
+            if event_active:
+                text += f"\n⚡ *Reaction*: ⏳ Waiting for market response (event risk active: {event_count})"
+            else:
+                text += f"\n⚡ *Reaction*: ⏸️ No active event risk"
+
+        # ===== LAST DECISION =====
         if last:
-            text += f"\n📝 *Last Decision*\n"
+            text += f"\n\n📝 *Last Decision*\n"
             text += f"├─ Mode: {last.mode} | Score: {last.score}\n"
             text += f"├─ Intent: {last.intent} | Belief: {last.belief}\n"
             text += f"├─ Drift: {last.intent_drift:.2f}\n"
@@ -6900,23 +7022,24 @@ def cmd_debug(m):
             else:
                 text += f"└─ Status: ⏳ PENDING\n"
 
-        text += f"\n🧊 *Hidden Liquidity*: {hl['score']}% ({hl['side']})\n"
-        text += f"📊 *Intent Drift*: {drift:.2f}\n"
-        text += f"⚡ *Reaction*: {reaction.event if reaction else 'None'}\n"
-
+        # ===== EVENT RISK =====
         event_adj = get_event_risk_adjustment()
         if event_adj.get("importance", 0) > 20:
-            text += f"📅 *Event Risk*: {event_adj['importance']:.0f}% | Bias: {event_adj['bias']:+.0f}\n"
+            text += f"\n📅 *Event Risk*: {event_adj['importance']:.0f}% | Bias: {event_adj['bias']:+.0f}"
+
+        # ===== JOURNAL SIZE =====
+        with _journal_lock:
+            journal_size = len(_decision_journal)
+        text += f"\n\n📚 Journal: {journal_size} entries"
 
         bot.reply_to(m, text, parse_mode='Markdown')
 
     except Exception as e:
-        # Kirim traceback ke user biar keliatan line exact
         tb = traceback.format_exc()
-        # Potong kalau kepanjangan (max 4000 chars)
         if len(tb) > 4000:
             tb = tb[-4000:]
         bot.reply_to(m, f"❌ *Error*\n```\n{tb}\n```", parse_mode='Markdown')
+
     
 
 # ============================================================
