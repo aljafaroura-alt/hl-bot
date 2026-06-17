@@ -5100,9 +5100,8 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                          micro_acc.get("score", 50), context)
 
     update_intent_timeline(coin, intent.value)
-
-    # PATCH 2: DISCOVERY → WATCH
-   if intent_drift > 0.7:
+                          # PATCH 2: DISCOVERY → WATCH
+    if intent_drift > 0.7:
         mode_override = "WATCH"
         final_threshold = int(final_threshold * 1.3)
         position_size_mult *= 0.3
@@ -5115,6 +5114,8 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         why_not += " | OBSERVE mode: moderate drift, reduced size"
     else:
         mode_override = None
+
+
 
     # ===== THRESHOLD CHECK =====
     if confidence_data["final_score"] < final_threshold:
