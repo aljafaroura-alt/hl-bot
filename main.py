@@ -202,6 +202,36 @@ class CacheManager:
 
 # GLOBAL CACHE
 CACHE = CacheManager()
+
+# ========== GLOBAL API COOLDOWN ==========
+_api_cooldown_until: float = 0.0
+_api_cooldown_lock = threading.RLock()
+
+def can_call_api() -> bool:
+    """Cek apakah API boleh dipanggil"""
+    with _api_cooldown_lock:
+        return time.time() >= _api_cooldown_until
+
+def trigger_api_cooldown(seconds: int = 30):
+    """Trigger cooldown ketika kena 429"""
+    global _api_cooldown_until
+    with _api_cooldown_lock:
+        _api_cooldown_until = time.time() + seconds
+        logger.warning(f"🔴 API cooldown triggered for {seconds}s")
+
+def api_call_wrapper(func: Callable, *args, **kwargs):
+    """Wrapper untuk semua API calls dengan cooldown"""
+    if not can_call_api():
+        logger.debug("⏳ API on cooldown, skipping request")
+        return None
+    
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        if "429" in str(e) or "rate limit" in str(e).lower():
+            trigger_api_cooldown(30)
+            logger.error(f"🚫 Rate limit hit on {func.__name__}, cooldown activated")
+        raise
     
 # ========== ENUMS ==========
 class MarketState(Enum):
@@ -1637,15 +1667,20 @@ def _get_adaptive_snapshot_ttl() -> int:
         return {"LOW_VOLATILITY": 15, "HIGH_VOLATILITY": 3}.get(vol, 8)
     except:
         return _SNAPSHOT_TTL
-
+        
 def refresh_snapshot():
     now = time.time()
     ttl = _get_adaptive_snapshot_ttl()
     
-    # PAKAI CACHE MANAGER
+    # PAKAI CACHE DULU
     cached = CACHE.get("snapshot", max_age=ttl)
     if cached:
-        return
+        return cached
+    
+    # CEK COOLDOWN
+    if not can_call_api():
+        logger.debug("⏳ API on cooldown, using stale snapshot")
+        return CACHE.get("snapshot")  # return stale
     
     try:
         meta = info.meta_and_asset_ctxs()
@@ -1660,8 +1695,6 @@ def refresh_snapshot():
             funding[name] = float(ctx.get("funding", 0)) * 100
         
         snapshot = MarketSnapshot(timestamp=now, mids=mids, oi=oi, funding=funding)
-        
-        # SIMPAN KE CACHE
         CACHE.set("snapshot", snapshot)
         
         with _last_mids_lock:
@@ -1679,13 +1712,29 @@ def refresh_snapshot():
             with _funding_lock:
                 _funding_cache[coin] = (val, now)
             update_data_integrity_history(coin, 0, val, 0)
+        
+        return snapshot
+        
     except Exception as e:
+        if "429" in str(e):
+            trigger_api_cooldown(30)
+            # Return stale snapshot
+            stale = CACHE.get("snapshot")
+            if stale:
+                logger.warning(f"⚠️ Using stale snapshot due to rate limit")
+                return stale
         logger.error(f"Snapshot refresh error: {e}")
+        return None
 
 def get_snapshot() -> MarketSnapshot:
-    refresh_snapshot()
-    cached = CACHE.get("snapshot")
-    return cached if cached else MarketSnapshot(timestamp=time.time(), mids={}, oi={}, funding={})
+    snapshot = refresh_snapshot()
+    if snapshot:
+        return snapshot
+    # Fallback: return empty tapi jangan request lagi
+    stale = CACHE.get("snapshot")
+    if stale:
+        return stale
+    return MarketSnapshot(timestamp=time.time(), mids={}, oi={}, funding={})
         
 # ========== DATA FUNCTIONS ==========
 def detect_outlier(values: List[float], new_value: float) -> bool:
@@ -3439,10 +3488,26 @@ def calculate_sltp_advanced(coin: str, mark: float, direction: str, event: Trade
 # ============================================================
 # PART 31 – LAYER 1: OBSERVE MARKET
 # ============================================================
-
 def observe_market(coin: str, mark: float, master_candles: Dict) -> Optional[Dict]:
     """Layer 1: Kumpulkan semua data dan event"""
+    
+    # ===== STALE MODE CHECK =====
+    snapshot = get_snapshot()
+    snapshot_age = time.time() - snapshot.timestamp if snapshot else 999
+    
+    stale_mode = False
+    if snapshot_age > 60:
+        logger.debug(f"⚠️ Stale mode: snapshot age {snapshot_age:.1f}s")
+        stale_mode = True
+    if snapshot_age > 180:
+        logger.warning(f"🔴 Degraded mode: snapshot age {snapshot_age:.1f}s, skipping new entries")
+        return None
+    
     data_confidence, ages = get_data_confidence(coin, time.time())
+    if stale_mode:
+        
+        data_confidence = int(data_confidence * 0.8)
+    
     if data_confidence < ENGINE_CONSTANTS["MIN_DATA_CONFIDENCE"]:
         return None
 
