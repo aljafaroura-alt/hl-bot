@@ -1227,7 +1227,24 @@ def get_intelligence_metrics() -> dict:
         "belief_stability": _compute_belief_drift(),
         "execution_precision": get_analytics()["win_rate"],
     }
-    
+
+# ========== RETRY WITH BACKOFF ==========
+def retry_with_backoff(func: Callable, max_retries: int = 3, base_delay: float = 15, *args, **kwargs):
+    """Retry dengan exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
+                logger.warning(f"🔄 Retry {attempt+1}/{max_retries} in {delay:.1f}s: {func.__name__}")
+                time.sleep(delay)
+                if attempt == max_retries - 1:
+                    trigger_api_cooldown(60)
+                    raise
+            else:
+                raise
+    return None
 # ============================================================
 # PART 11 – CONTEXT ENGINE V10 (Bagian 1)
 # ============================================================
@@ -1872,7 +1889,8 @@ def get_data_confidence(coin: str, current_time: float) -> Tuple[int, Dict[str, 
     integrity_score = get_data_integrity_score(coin)
     final_confidence = int(total_score * 0.7 + integrity_score * 0.3)
     return final_confidence, ages
-
+    
+    
 def get_candles(coin: str, timeframe: str, limit: int = 80, master: Dict = None) -> List[dict]:
     if master and coin in master:
         return master[coin]
@@ -1880,10 +1898,12 @@ def get_candles(coin: str, timeframe: str, limit: int = 80, master: Dict = None)
     key = f"candles_{coin}_{timeframe}_{limit}"
     ttl = {"5m": 60, "15m": 120, "1h": 300, "4h": 600}.get(timeframe, 300)
     
-    # PAKAI CACHE MANAGER
     cached = CACHE.get(key, max_age=ttl)
     if cached:
         return cached
+    
+    if not can_call_api():
+        return []
     
     try:
         end_ms = int(time.time() * 1000)
@@ -1892,6 +1912,10 @@ def get_candles(coin: str, timeframe: str, limit: int = 80, master: Dict = None)
         start_ms = end_ms - limit * interval
         candles = info.candles_snapshot(coin, timeframe, start_ms, end_ms) or []
     except Exception as e:
+        if "429" in str(e):
+            trigger_api_cooldown(30)
+            logger.error(f"🚫 Rate limit on candles {coin}")
+            return []
         logger.error(f"get_candles failed for {coin}: {e}")
         candles = []
     
@@ -4515,14 +4539,11 @@ def graceful_shutdown():
 
 def state_engine_update_v10():
     """State Engine V10: refresh context + scan top coins + reaction engine update"""
-    # Refresh context
     context = get_context_snapshot("BTC")
     refresh_snapshot()
-
-    # V10: Update breath cache
     compute_market_breath_v10()
-
-    # V10: Check for reactions (if there's an event)
+    
+    # ===== REACTION ENGINE =====
     with _event_risk_lock:
         if _EVENT_RISK_DATA:
             latest_event = max(_EVENT_RISK_DATA, key=lambda e: e.ts)
@@ -4538,7 +4559,8 @@ def state_engine_update_v10():
                                 vol_spike = get_volume_spike("BTC")
                                 reaction = compute_reaction(latest_event, btc_move, vol_spike)
                                 update_reaction_history(reaction)
-
+    
+    # ===== TOP COINS =====
     try:
         meta = info.meta_and_asset_ctxs()
         coins_vol = []
@@ -4551,24 +4573,43 @@ def state_engine_update_v10():
     except Exception as e:
         logger.error(f"State engine top coins error: {e}")
         top_coins = ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "MATIC", "LINK", "UNI", "AAVE"]
-
+    
+    # ===== BATCH SCAN (PATCH 4) =====
+    BATCH_SIZE = 5
+    BATCH_WAIT = 3  # detik antar batch
+    
     master_candles = fetch_candles_master(top_coins, "1h", 100)
     alerts = []
-
-    for coin in top_coins:
-        mark = 0.0
-        snapshot = get_snapshot()
-        if snapshot and coin in snapshot.mids:
-            mark = snapshot.mids[coin]
-        if mark == 0 or coin not in master_candles:
-            continue
-        alert = check_entry_alert_v10(coin, mark, master_candles)
-        if alert and not PAPER_MODE:
-            alerts.append(alert)
-        elif alert and PAPER_MODE:
-            logger.info(f"[PAPER] {alert['coin']} {alert['direction']} score={alert['score']} belief={alert.get('belief_state', 'SEEKING')} mode={alert.get('execution_mode_v10', 'NORMAL')}")
-        time.sleep(0.05)
-
+    
+    for i in range(0, len(top_coins), BATCH_SIZE):
+        batch = top_coins[i:i+BATCH_SIZE]
+        logger.debug(f"📊 Scanning batch {i//BATCH_SIZE + 1}: {batch}")
+        
+        for coin in batch:
+            mark = 0.0
+            snapshot = get_snapshot()
+            if snapshot and coin in snapshot.mids:
+                mark = snapshot.mids[coin]
+            if mark == 0 or coin not in master_candles:
+                continue
+            
+            # CEK COOLDOWN SEBELUM ENTRY CHECK
+            if not can_call_api():
+                logger.warning(f"⏳ API cooldown, skipping {coin}")
+                continue
+            
+            alert = check_entry_alert_v10(coin, mark, master_candles)
+            if alert and not PAPER_MODE:
+                alerts.append(alert)
+            elif alert and PAPER_MODE:
+                logger.info(f"[PAPER] {alert['coin']} {alert['direction']} score={alert['score']}")
+            time.sleep(0.1)  # 100ms antar coin
+        
+        # WAIT ANTAR BATCH
+        if i + BATCH_SIZE < len(top_coins):
+            logger.debug(f"⏳ Waiting {BATCH_WAIT}s before next batch...")
+            time.sleep(BATCH_WAIT)
+    
     for alert in alerts:
         send_alert_v10(alert)
 
