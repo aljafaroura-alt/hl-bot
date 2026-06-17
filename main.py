@@ -4,7 +4,7 @@
 # ============================================================
 # Filosofi: Baca MARKET REACTION, bukan baca berita
 # DNA: Market Interpretation → Market Anticipation
-# Owner: Cryptone Project
+# Owner: Cryptone 
 # ============================================================
 
 import os
@@ -277,14 +277,15 @@ class BotHealthState(Enum):
     DEGRADED = "degraded"
     RECOVERY = "recovery"
     FAILED = "failed"
-
-# V10: 5 Execution Modes
+    
 class ExecutionMode(Enum):
     NORMAL = "normal"
     PREPARE = "prepare"
     CAUTIOUS = "cautious"
     AGGRESSIVE = "aggressive"
     DEFENSIVE = "defensive"
+    DISCOVERY = "discovery"   
+    OBSERVE = "observe"      
     
 # ========== V10: DATACLASSES ==========
 @dataclass
@@ -302,10 +303,10 @@ class ContextSnapshot:
 
 @dataclass
 class EventRisk:
-    importance: int          # 0-100
-    expected_vol: int        # 0-100
-    scope: str               # "macro" | "sector" | "coin"
-    bias: str                # "neutral" | "bullish" | "bearish"
+    importance: int          
+    expected_vol: int        
+    scope: str               
+    bias: str                
     label: str
     ts: float
 
@@ -388,6 +389,47 @@ class DecisionTrace:
     what_changed: str
     context_age: float = 0.0
     execution_mode: str = "NORMAL"
+
+@dataclass
+class DecisionJournalEntry:
+    timestamp: float
+    coin: str
+    event_type: str
+    direction: str
+    score: int
+    mode: str
+    executed: bool
+    shadow: bool
+    entry: float
+    sl: float
+    tp: float
+    rr: float
+    intent: str
+    belief: str
+    decision_energy: float
+    hidden_liquidity: int
+    micro_acceptance: Optional[float]
+    failed_risk: float
+    intent_drift: float
+    surprise: float
+    narrative: Dict[str, str]
+    outcome: Optional[str] = None
+    pnl: Optional[float] = None
+    mfe: Optional[float] = None
+    mae: Optional[float] = None
+
+@dataclass
+class FailedMoveFingerprint:
+    coin: str
+    event_type: str
+    delta_bucket: str
+    vol_bucket: str
+    clarity: str
+    intent: str
+    direction: str
+    price: float
+    timestamp: float
+    reason: str
 
 # ============================================================
 # PHASE 1 — INTERPRETATION ENGINE DATACLASSES
@@ -645,6 +687,20 @@ _circuit_breaker_lock = threading.RLock()
 
 _EVAL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eval_")
 _SHADOW_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="shadow_")
+
+_decision_journal: List[DecisionJournalEntry] = []
+_journal_lock = threading.RLock()
+_review_counter = 0
+_review_lock = threading.RLock()
+_AUTO_REVIEW_INTERVAL = 50
+_failed_memory: Dict[str, List[FailedMoveFingerprint]] = {}
+_failed_lock = threading.RLock()
+_smoothed_drift: Dict[str, float] = {}
+_smoothed_drift_lock = threading.RLock()
+_intent_timeline: Dict[str, deque] = {}
+_intent_timeline_lock = threading.RLock()
+_intent_vector_history: Dict[str, deque] = {}
+_intent_vector_lock = threading.RLock()
 
 # Hyperliquid API
 info = Info(constants.MAINNET_API_URL)
@@ -3033,6 +3089,394 @@ def compute_commitment_score(belief_state: BeliefState, confidence_score: float,
     score += pressure_scores.get(time_pressure, 0)
     score += prediction_quality * 0.1
     return min(100, score)
+
+
+def bucket_value(value, low=3, high=8):
+    if abs(value) > high: return "HIGH"
+    if abs(value) > low: return "MID"
+    return "LOW"
+
+def store_failed_move(coin, event_type, delta, vol_spike, clarity, intent, direction, price, reason):
+    with _failed_lock:
+        fp = FailedMoveFingerprint(
+            coin=coin,
+            event_type=event_type,
+            delta_bucket=bucket_value(delta),
+            vol_bucket=bucket_value(vol_spike, low=1.5, high=2.5),
+            clarity=clarity,
+            intent=intent,
+            direction=direction,
+            price=price,
+            timestamp=time.time(),
+            reason=reason
+        )
+        if coin not in _failed_memory:
+            _failed_memory[coin] = []
+        _failed_memory[coin].append(fp)
+        if len(_failed_memory[coin]) > 50:
+            _failed_memory[coin] = _failed_memory[coin][-50:]
+
+def get_failed_move_risk(coin, event_type, delta, vol_spike, clarity, intent, direction, current_price):
+    with _failed_lock:
+        if coin not in _failed_memory:
+            return {"risk": 1.0, "reason": None}
+        now = time.time()
+        similarities = []
+        for fp in _failed_memory[coin]:
+            age_h = (now - fp.timestamp) / 3600
+            if age_h > 48:
+                continue
+            time_weight = np.exp(-age_h / 8)
+            if fp.direction != direction:
+                continue
+            price_dist = abs(fp.price - current_price) / max(fp.price, 0.01) * 100
+            if price_dist > 5:
+                continue
+            sim = 0.0
+            sim += 0.3 if fp.event_type == event_type else 0.0
+            sim += 0.3 if fp.delta_bucket == bucket_value(delta) else 0.0
+            sim += 0.2 if fp.vol_bucket == bucket_value(vol_spike, low=1.5, high=2.5) else 0.0
+            sim += 0.2 if fp.clarity == clarity else 0.0
+            if fp.intent == intent:
+                sim += 0.1
+            sim *= time_weight
+            similarities.append((sim, price_dist, fp.reason))
+
+        if not similarities:
+            return {"risk": 1.0, "reason": None}
+        max_sim = max(s[0] for s in similarities)
+        if max_sim > 0.5:
+            best_dist = min(s[1] for s in similarities if s[0] > 0.5)
+            best_reason = next((s[2] for s in similarities if s[0] > 0.5 and s[1] == best_dist), None)
+            if best_dist < 1.0:
+                return {"risk": 0.7, "reason": best_reason or "similar failed setup (price near)"}
+            elif best_dist < 2.0:
+                return {"risk": 0.8, "reason": best_reason or "similar failed setup (price nearby)"}
+            else:
+                return {"risk": 0.9, "reason": best_reason or "similar failed setup (price distant)"}
+        return {"risk": 1.0, "reason": None}
+
+def compute_hidden_liquidity(coin: str, candles_5m: List[dict], delta_history: List[float],
+                              oi_history: List[float]) -> Dict[str, Any]:
+    if len(candles_5m) < 6 or len(delta_history) < 5:
+        return {"score": 0, "side": "NONE", "persistence": 0}
+
+    prices = [float(c['c']) for c in candles_5m[-5:]]
+    price_move_pct = abs(prices[-1] - prices[-5]) / max(prices[-5], 0.01) * 100
+
+    vols = [float(c['v']) * float(c['c']) for c in candles_5m[-5:]]
+    delta_abs_sum = sum(abs(d) for d in delta_history[-5:])
+    vol_median = np.median(vols) if vols else 1.0
+    if vol_median == 0:
+        return {"score": 0, "side": "NONE", "persistence": 0}
+    delta_norm = delta_abs_sum / (vol_median * len(vols))
+    delta_norm = np.clip(delta_norm, 0.002, 0.1)
+
+    efficiency = price_move_pct / max(delta_norm, 0.001)
+    if efficiency > 0.3:
+        return {"score": 0, "side": "NONE", "persistence": 0}
+
+    avg_vol = sum(vols[:-1]) / max(1, len(vols)-1)
+    vol_ratio = vols[-1] / max(avg_vol, 0.01)
+    if vol_ratio < 1.5:
+        return {"score": 0, "side": "NONE", "persistence": 0}
+
+    oi_start = oi_history[-5] if len(oi_history) >= 5 else oi_history[-1]
+    oi_end = oi_history[-1]
+    oi_trend = (oi_end - oi_start) / max(oi_start, 0.01) * 100 if oi_start > 0 else 0
+    oi_component = max(0, 20 - abs(oi_trend) * 2)
+
+    persistence = 0
+    for i in range(1, min(6, len(candles_5m))):
+        sub_prices = [float(c['c']) for c in candles_5m[-i-1:]]
+        sub_move = abs(sub_prices[-1] - sub_prices[0]) / max(sub_prices[0], 0.01) * 100
+        sub_vols = [float(c['v']) * float(c['c']) for c in candles_5m[-i-1:]]
+        sub_avg = sum(sub_vols[:-1]) / max(1, len(sub_vols)-1)
+        if sub_avg == 0:
+            continue
+        sub_vol_ratio = sub_vols[-1] / sub_avg
+        if sub_move < 0.3 and sub_vol_ratio > 1.2:
+            persistence += 1
+        else:
+            break
+
+    delta_side = "BUYER" if delta_history[-1] > 0 else "SELLER"
+    score = (
+        35 * max(0, min(1, 1 - efficiency)) +
+        25 * np.log1p(vol_ratio) +
+        20 * min(1, persistence / 3) +
+        20 * (oi_component / 20)
+    )
+    score = min(100, int(score))
+    side = f"{delta_side}_ABSORBING" if score > 30 else "NONE"
+    return {"score": int(score), "side": side, "persistence": persistence}
+
+def compute_micro_acceptance(coin: str, event: TradeEvent, candles_5m: List[dict]) -> Dict[str, Any]:
+    if not candles_5m or len(candles_5m) < 5:
+        return {"score": None, "status": "INSUFFICIENT"}
+
+    touched = False
+    for i in range(len(candles_5m)-1, max(0, len(candles_5m)-8), -1):
+        low, high = float(candles_5m[i]['l']), float(candles_5m[i]['h'])
+        if event.direction == "LONG" and low <= event.price_low * 1.002:
+            touched = True
+            break
+        if event.direction == "SHORT" and high >= event.price_high * 0.998:
+            touched = True
+            break
+
+    if not touched:
+        return {"score": None, "status": "UNTESTED"}
+
+    touch_idx = None
+    for i in range(len(candles_5m)-1, max(0, len(candles_5m)-8), -1):
+        low, high = float(candles_5m[i]['l']), float(candles_5m[i]['h'])
+        if event.direction == "LONG" and low <= event.price_low * 1.002:
+            touch_idx = i
+            break
+        if event.direction == "SHORT" and high >= event.price_high * 0.998:
+            touch_idx = i
+            break
+
+    if touch_idx is None:
+        return {"score": None, "status": "PENDING"}
+
+    if touch_idx >= len(candles_5m) - 3:
+        return {"score": None, "status": "PENDING"}
+
+    zone_low = event.price_low if event.direction == "LONG" else event.price_high * 0.99
+    zone_high = event.price_high if event.direction == "SHORT" else event.price_low * 1.01
+
+    inside_time = 0
+    volume_inside = 0
+    retest_count = 0
+    rejection_count = 0
+    total_candles_after = 0
+
+    max_lookback = min(touch_idx + 5, len(candles_5m))
+    for j in range(touch_idx+1, max_lookback):
+        c = candles_5m[j]
+        close = float(c['c'])
+        low = float(c['l'])
+        high = float(c['h'])
+        total_candles_after += 1
+
+        if event.direction == "LONG":
+            if close > zone_low:
+                inside_time += 1
+            if low <= zone_low and close > zone_low:
+                retest_count += 1
+            if high > zone_high and close < zone_low:
+                rejection_count += 1
+        else:
+            if close < zone_high:
+                inside_time += 1
+            if high >= zone_high and close < zone_high:
+                retest_count += 1
+            if low < zone_low and close > zone_high:
+                rejection_count += 1
+
+        if (event.direction == "LONG" and close > zone_low) or (event.direction == "SHORT" and close < zone_high):
+            volume_inside += float(c['v']) * float(c['c'])
+
+    if total_candles_after == 0:
+        return {"score": None, "status": "PENDING"}
+
+    time_score = min(30, inside_time * 6)
+    vol_avg = sum(float(candles_5m[j]['v']) * float(candles_5m[j]['c']) for j in range(max(0, touch_idx-5), touch_idx)) / 5
+    vol_score = min(40, (volume_inside / max(vol_avg, 1)) * 10) if vol_avg > 0 else 20
+    retest_score = min(20, retest_count * 5)
+    rejection_penalty = min(20, rejection_count * 5)
+    score = max(0, min(100, time_score + vol_score + retest_score - rejection_penalty))
+
+    if score > 60:
+        status = "ACCEPTED"
+    elif score < 30 and rejection_count > 0:
+        status = "REJECTED"
+    else:
+        status = "MIXED"
+
+    return {"score": score, "status": status}
+    
+
+def update_intent_vector(coin: str, event: TradeEvent, delta: float, vol_spike: float,
+                          acceptance_score: float, context: ContextSnapshot):
+    liquidity_score = 1.0 if event.type == "LIQUIDITY" else (0.5 if event.type in ("OB", "FVG") else 0.0)
+    acceptance_norm = acceptance_score / 100.0 if acceptance_score else 0.5
+    displacement_score = 1.0 if event.extra.get("displaced", False) else 0.0
+    delta_normalized = np.tanh(delta / 10.0)
+
+    regime_map = {"TRENDING_UP": 1.0, "RANGING": 0.0, "TRENDING_DOWN": -1.0}
+    regime_val = regime_map.get(context.regime, 0.0)
+    breadth_val = context.breath_bull
+
+    vector = [
+        liquidity_score,
+        acceptance_norm,
+        displacement_score,
+        delta_normalized,
+        regime_val,
+        breadth_val
+    ]
+
+    with _intent_vector_lock:
+        if coin not in _intent_vector_history:
+            _intent_vector_history[coin] = deque(maxlen=10)
+        _intent_vector_history[coin].append((time.time(), vector))
+
+def compute_intent_drift(coin: str) -> float:
+    with _intent_vector_lock:
+        if coin not in _intent_vector_history or len(_intent_vector_history[coin]) < 4:
+            return 0.0
+        recent = list(_intent_vector_history[coin])
+        now = time.time()
+        new_vectors = [v for ts, v in recent if now - ts < 600]
+        old_vectors = [v for ts, v in recent if now - ts >= 600 and now - ts < 3600]
+        if len(new_vectors) < 2 or len(old_vectors) < 2:
+            return 0.0
+        new_avg = np.mean(new_vectors, axis=0)
+        old_avg = np.mean(old_vectors, axis=0)
+        dot = np.dot(new_avg, old_avg)
+        norm_new = np.linalg.norm(new_avg)
+        norm_old = np.linalg.norm(old_avg)
+        if norm_new == 0 or norm_old == 0:
+            return 0.0
+        sim = dot / (norm_new * norm_old)
+        raw_drift = min(1.0, max(0.0, 1.0 - sim))
+
+        with _smoothed_drift_lock:
+            prev = _smoothed_drift.get(coin, raw_drift)
+            smoothed = 0.7 * prev + 0.3 * raw_drift
+            _smoothed_drift[coin] = smoothed
+            return smoothed
+
+def log_decision_journal(entry: DecisionJournalEntry):
+    with _journal_lock:
+        _decision_journal.append(entry)
+        if len(_decision_journal) > 2000:
+            _decision_journal = _decision_journal[-2000:]
+
+def get_decision_journal(coin: str = None, mode: str = None, limit: int = 100) -> List[DecisionJournalEntry]:
+    with _journal_lock:
+        result = _decision_journal
+        if coin:
+            result = [e for e in result if e.coin == coin]
+        if mode:
+            result = [e for e in result if e.mode == mode]
+        return result[-limit:]
+
+def auto_review():
+    global _review_counter
+    with _review_lock:
+        _review_counter += 1
+        if _review_counter % _AUTO_REVIEW_INTERVAL != 0:
+            return
+
+    with _journal_lock:
+        entries = _decision_journal[-50:]
+
+    if len(entries) < 20:
+        return
+
+    modes = {}
+    for e in entries:
+        mode = e.mode if e.mode else "UNKNOWN"
+        if mode not in modes:
+            modes[mode] = {"total": 0, "wins": 0, "pnl": [], "rr": [], "drifts": [], "executed": 0, "shadow": 0}
+        modes[mode]["total"] += 1
+        if e.outcome in ("TP_HIT", "PARTIAL_WIN"):
+            modes[mode]["wins"] += 1
+        if e.pnl is not None:
+            modes[mode]["pnl"].append(e.pnl)
+        if e.rr is not None:
+            modes[mode]["rr"].append(e.rr)
+        modes[mode]["drifts"].append(e.intent_drift)
+        if e.executed:
+            modes[mode]["executed"] += 1
+        else:
+            modes[mode]["shadow"] += 1
+
+    text = f"📊 *DECISION REVIEW* (last {len(entries)})\n━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    reject_reasons = {}
+    for e in entries:
+        if not e.executed and e.narrative and "what_now" in e.narrative:
+            reason = e.narrative["what_now"].split(":")[0] if ":" in e.narrative["what_now"] else e.narrative["what_now"][:30]
+            reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+    if reject_reasons:
+        top_reason = max(reject_reasons, key=reject_reasons.get)
+        text += f"🚫 *Top reject reason*: {top_reason} ({reject_reasons[top_reason]}x)\n\n"
+
+    for mode, stats in modes.items():
+        if stats["total"] < 3:
+            continue
+        win_rate = stats["wins"] / max(1, stats["total"])
+        avg_pnl = sum(stats["pnl"]) / max(1, len(stats["pnl"]))
+        avg_rr = sum(stats["rr"]) / max(1, len(stats["rr"]))
+        avg_drift = sum(stats["drifts"]) / max(1, len(stats["drifts"]))
+        bar = "█" * int(win_rate * 10) + "░" * (10 - int(win_rate * 10))
+
+        emoji = "🟢" if win_rate > 0.55 else "🟡" if win_rate > 0.45 else "🔴"
+        text += f"{emoji} *{mode}*\n"
+        text += f"├─ Total: {stats['total']} | Exec: {stats['executed']} | Shadow: {stats['shadow']}\n"
+        text += f"├─ WR: {win_rate*100:.0f}% [{bar}] | AvgRR: {avg_rr:.2f}\n"
+        text += f"├─ AvgPnL: {avg_pnl:+.2f}% | AvgDrift: {avg_drift:.2f}\n\n"
+
+    total_executed = sum(s["executed"] for s in modes.values())
+    total_shadow = sum(s["shadow"] for s in modes.values())
+    text += f"📌 Summary: {total_executed} executed, {total_shadow} shadow avoided"
+
+    try:
+        bot.send_message(USER_ID, text, parse_mode='Markdown')
+        if CHANNEL_ID:
+            bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Auto review send error: {e}")
+
+def snapshot_metrics() -> Dict[str, Any]:
+    with _journal_lock:
+        journal_size = len(_decision_journal)
+
+    with _failed_lock:
+        failed_memory = sum(len(v) for v in _failed_memory.values())
+
+    with _smoothed_drift_lock:
+        avg_drift = np.mean(list(_smoothed_drift.values())) if _smoothed_drift else 0.0
+
+    with _journal_lock:
+        recent = _decision_journal[-100:]
+        if recent:
+            shadows = sum(1 for e in recent if not e.executed)
+            discovery_ratio = shadows / len(recent)
+        else:
+            discovery_ratio = 0.0
+
+    now = time.time()
+    with _journal_lock:
+        last_24h = [e for e in _decision_journal if now - e.timestamp < 86400]
+
+    return {
+        "journal_size": journal_size,
+        "failed_memory": failed_memory,
+        "avg_drift": round(avg_drift, 3),
+        "discovery_ratio": round(discovery_ratio, 3),
+        "last_24h_decisions": len(last_24h),
+        "timestamp": now
+    }
+
+def log_snapshot_metrics():
+    while RUNTIME.is_running():
+        metrics = snapshot_metrics()
+        logger.info(f"📊 Metrics: journal={metrics['journal_size']}, "
+                   f"failed_mem={metrics['failed_memory']}, "
+                   f"avg_drift={metrics['avg_drift']:.2f}, "
+                   f"disc_ratio={metrics['discovery_ratio']:.2f}, "
+                   f"24h_dec={metrics['last_24h_decisions']}")
+
+        if metrics["discovery_ratio"] > 0.4:
+            logger.warning(f"⚠️ High discovery ratio: {metrics['discovery_ratio']:.2f} (too many shadows)")
+
+        RUNTIME.wait(1800)
     
 # ============================================================
 # PART 26 – EXECUTION MODE BLEND + FATIGUE + FILTER GRADIENT
@@ -4601,7 +5045,136 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         exec_mode, intent_success
     )
     explanation += f"\n🧼 *Clarity*: {clarity['decision_quality']:.2f} (dom: {clarity['dominant_factor']})"
+    # ===== ADVANCED METRICS =====
+    # Hidden liquidity
+    candles_5m = get_candles(coin, "5m", 20, thesis_data["master_candles"])
+    delta_history = list(_rolling_delta.get(coin, []))[-5:]
+    oi_history = [v for ts, v in _oi_history.get(coin, [])[-5:]]
+    hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {"score": 0, "side": "NONE"}
 
+    # Micro acceptance
+    micro_acc = compute_micro_acceptance(coin, event, candles_5m) if candles_5m else {"score": None, "status": "INSUFFICIENT"}
+
+    # Failed move risk
+    clarity_str = "UNCLEAR" if confidence_data["entropy_market"] > 50 else "CLEAR"
+    failed_risk = get_failed_move_risk(
+    coin, event.type, thesis_data["delta"], thesis_data["vol_spike"],
+    clarity_str, intent.value, event.direction, mark
+    )
+
+    # Intent drift
+    intent_drift = compute_intent_drift(coin)
+
+    # Surprise
+    expected_move = thesis_data.get("atr_pct", 0.5)
+    actual_move = thesis_data["vol_spike"] * 0.5
+    surprise = compute_surprise_index(coin, expected_move, actual_move)
+
+    # Update intent vector
+    update_intent_vector(coin, event, thesis_data["delta"], thesis_data["vol_spike"],
+                         micro_acc.get("score", 50), context)
+
+    # Update intent timeline
+    update_intent_timeline(coin, intent.value)
+
+    # ===== DISCOVERY / OBSERVE MODE =====
+    allow_entry = True
+    if intent_drift > 0.7:
+        mode_override = "DISCOVERY"
+        final_threshold = int(final_threshold * 1.3)
+        position_size_mult *= 0.3
+        allow_entry = False
+        why_not += " | DISCOVERY mode: high intent drift, observing only"
+    elif intent_drift > 0.5:
+        mode_override = "OBSERVE"
+        final_threshold = int(final_threshold * 1.1)
+        position_size_mult *= 0.7
+        why_not += " | OBSERVE mode: moderate drift, reduced size"
+    else:
+        mode_override = None
+        # ===== THRESHOLD CHECK =====
+if confidence_data["final_score"] < final_threshold:
+    if position_size_mult > 0.3:
+        position_size_mult = max(0.15, position_size_mult * 0.7)
+    else:
+        update_fatigue_memory(event.type)
+        return None
+
+# If DISCOVERY mode, still log but don't execute
+if not allow_entry:
+    # Build shadow result
+    shadow_result = {
+        "executed": False,
+        "mode": "DISCOVERY",
+        "shadow": True,
+        "coin": coin,
+        "direction": event.direction,
+        "entry": mark,
+        "sl": confidence_data["sl"],
+        "tp": confidence_data["tp"],
+        "rr": confidence_data["rr"],
+        "score": confidence_data["final_score"],
+        "area": event.type,
+        "label": "🔍 DISCOVERY",
+        "why_not": why_not,
+        "hypothesis": thesis_obj,
+        "context_age": context_age,
+        # ... tambahkan field lain sesuai kebutuhan
+    }
+    # Log journal for shadow
+    journal_entry = DecisionJournalEntry(
+        timestamp=time.time(),
+        coin=coin,
+        event_type=event.type,
+        direction=event.direction,
+        score=confidence_data["final_score"],
+        mode="DISCOVERY",
+        executed=False,
+        shadow=True,
+        entry=mark,
+        sl=confidence_data["sl"],
+        tp=confidence_data["tp"],
+        rr=confidence_data["rr"],
+        intent=intent.value,
+        belief=belief.value,
+        decision_energy=confidence_data["decision_energy"],
+        hidden_liquidity=hl.get("score", 0),
+        micro_acceptance=micro_acc.get("score"),
+        failed_risk=failed_risk.get("risk", 1.0),
+        intent_drift=intent_drift,
+        surprise=surprise,
+        narrative={}
+    )
+    log_decision_journal(journal_entry)
+    auto_review()
+    return shadow_result
+    # ===== LOG JOURNAL =====
+journal_entry = DecisionJournalEntry(
+    timestamp=time.time(),
+    coin=coin,
+    event_type=event.type,
+    direction=event.direction,
+    score=confidence_data["final_score"],
+    mode=execution_mode_str,
+    executed=True,
+    shadow=False,
+    entry=mark,
+    sl=confidence_data["sl"],
+    tp=confidence_data["tp"],
+    rr=confidence_data["rr"],
+    intent=intent.value,
+    belief=belief.value,
+    decision_energy=confidence_data["decision_energy"],
+    hidden_liquidity=hl.get("score", 0),
+    micro_acceptance=micro_acc.get("score"),
+    failed_risk=failed_risk.get("risk", 1.0),
+    intent_drift=intent_drift,
+    surprise=surprise,
+    narrative={}
+)
+log_decision_journal(journal_entry)
+auto_review()
+    
     # ===== RETURN RESULT =====
     return {
         "coin": coin, "direction": event.direction, "score": confidence_data["final_score"],
@@ -4655,6 +5228,14 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         "clarity_dominant_factor": clarity["dominant_factor"],
         "clarity_reasons": ", ".join(clarity["reasons"][:3]),
         "explanation": explanation
+        "hidden_liquidity": hl.get("score", 0),
+"hidden_side": hl.get("side", "NONE"),
+"micro_acceptance": micro_acc.get("score"),
+"micro_acceptance_status": micro_acc.get("status"),
+"failed_risk": failed_risk.get("risk", 1.0),
+"failed_reason": failed_risk.get("reason"),
+"intent_drift": intent_drift,
+"surprise": surprise,
     }
     
 # ============================================================
@@ -6453,6 +7034,16 @@ if __name__ == "__main__":
         threading.Thread(target=monitor_pending_setups_v6, daemon=True),
         threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
         threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
+        threads = [
+    threading.Thread(target=scheduled_state_engine_v10, daemon=True),
+    threading.Thread(target=scheduled_trigger_engine_v7, daemon=True),
+    threading.Thread(target=scheduled_shadow_evaluation_v7, daemon=True),
+    threading.Thread(target=scheduled_cleanup_v7, daemon=True),
+    threading.Thread(target=monitor_pending_setups_v6, daemon=True),
+    threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
+    threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
+    threading.Thread(target=log_snapshot_metrics, daemon=True, name="metrics_logger"),  # NEW
+    ]
     ]
     for t in threads:
         t.start()
