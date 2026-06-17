@@ -6891,14 +6891,44 @@ def cmd_warroom(m):
 @bot.message_handler(commands=['stopalert'])
 def cmd_stopalert(m):
     if m.from_user.id != USER_ID:
+        bot.reply_to(m, "⛔ Admin only")
         return
+    
     if RUNTIME.is_alert_enabled():
         RUNTIME.disable_alerts()
-        bot.reply_to(m, "🔴 Alert OFF")
+        # Ambil konteks buat feedback
+        ctx = get_context_snapshot("BTC")
+        text = f"""
+🔴 *ALERT OFF*
+━━━━━━━━━━━━━━━━━━━━━━
+Bot alert telah dimatikan.
+
+📊 *Market saat alert OFF*
+├─ Regime: {ctx.regime}
+├─ Shock: {ctx.shock_score:.0f}%
+└─ Transition: {ctx.transition_prob:.0f}%
+
+💡 Untuk mengaktifkan kembali:
+/stopalert
+"""
+        bot.reply_to(m, text, parse_mode='Markdown')
     else:
         RUNTIME.enable_alerts()
-        bot.reply_to(m, "🟢 Alert ON")
+        ctx = get_context_snapshot("BTC")
+        text = f"""
+🟢 *ALERT ON*
+━━━━━━━━━━━━━━━━━━━━━━
+Bot alert telah diaktifkan kembali.
 
+📊 *Market saat alert ON*
+├─ Regime: {ctx.regime}
+├─ Shock: {ctx.shock_score:.0f}%
+└─ Transition: {ctx.transition_prob:.0f}%
+
+💡 Untuk mematikan:
+/stopalert
+"""
+        bot.reply_to(m, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['health'])
 def cmd_health(m):
@@ -6988,6 +7018,9 @@ def cmd_health(m):
     else:
         checks.append(f"⚠️ threads ({thread_count})")
     
+    # Build checks string (dipindah ke luar f-string)
+    checks_str = "\n".join([f"├─ {c}" for c in checks])
+    
     status = "✅ HEALTHY" if not issues else f"⚠️ {len(issues)} issues"
     issues_text = "\n".join([f"├─ {i}" for i in issues[:5]]) if issues else "├─ all good"
     
@@ -7000,7 +7033,7 @@ def cmd_health(m):
 Status: {status}
 
 📊 *Checks*
-{"\n".join([f"├─ {c}" for c in checks])}
+{checks_str}
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ *Issues*
@@ -7010,6 +7043,8 @@ Status: {status}
    /debug BTC for deep dive
 """
     bot.reply_to(m, text, parse_mode='Markdown')
+
+
 
 
 @bot.message_handler(commands=['debug'])
