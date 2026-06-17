@@ -389,6 +389,96 @@ class DecisionTrace:
     context_age: float = 0.0
     execution_mode: str = "NORMAL"
 
+# ============================================================
+# PHASE 1 — INTERPRETATION ENGINE DATACLASSES
+# ============================================================
+
+@dataclass
+class RegimeInterpretation:
+    regime: str
+    strength: float
+    stability: float
+    confidence: float
+    age_minutes: float
+    transition_prob: float
+    transition_direction: str
+    is_breaking: bool
+    breaking_strength: float
+
+    def summary(self) -> str:
+        return (f"{self.regime} (str:{self.strength:.0f}%, stab:{self.stability:.0f}%, "
+                f"conf:{self.confidence:.0f}%, age:{self.age_minutes:.0f}m, "
+                f"trans:{self.transition_prob:.0f}% {self.transition_direction})")
+
+@dataclass
+class OBReaction:
+    touch_count: int
+    first_touch_time: float
+    last_touch_time: float
+    max_reaction_strength: float
+    avg_reaction: float
+    followthrough: float
+    confidence: float
+
+    def is_strong(self) -> bool:
+        return self.max_reaction_strength > 60 and self.followthrough > 50
+
+@dataclass
+class FVGQuality:
+    size: float
+    fill_ratio: float
+    fill_speed: float
+    reaction: float
+    age_minutes: float
+    quality_score: float
+
+    def summary(self) -> str:
+        return (f"size:{self.size:.0f}%, fill:{self.fill_ratio:.0%}, "
+                f"speed:{self.fill_speed:.0f}%, react:{self.reaction:.0f}%, "
+                f"age:{self.age_minutes:.0f}m, Q:{self.quality_score:.0f}")
+
+@dataclass
+class ContextMemory:
+    snapshots: List[ContextSnapshot] = field(default_factory=list)
+    max_size: int = 5
+
+    def add(self, ctx: ContextSnapshot):
+        self.snapshots.append(ctx)
+        if len(self.snapshots) > self.max_size:
+            self.snapshots.pop(0)
+
+    def get_trend(self, key: str) -> str:
+        if len(self.snapshots) < 2:
+            return "STABLE"
+        values = [getattr(s, key, 0) for s in self.snapshots]
+        if values[-1] > values[0] * 1.05:
+            return "RISING"
+        elif values[-1] < values[0] * 0.95:
+            return "FALLING"
+        return "STABLE"
+
+    def get_volatility_trend(self) -> str:
+        return self.get_trend("vol_forecast")
+
+    def get_regime_sequence(self) -> List[str]:
+        return [s.regime for s in self.snapshots]
+
+    def is_transitioning(self) -> bool:
+        if len(self.snapshots) < 3:
+            return False
+        regimes = self.get_regime_sequence()
+        changes = sum(1 for i in range(1, len(regimes)) if regimes[i] != regimes[i-1])
+        return changes >= 2
+
+@dataclass
+class CalibratedConfidence:
+    raw: float
+    calibrated: float
+    calibration_factor: float
+    sample_size: int
+    last_update: float
+    
+
     def to_dict(self):
         return asdict(self)
         
@@ -426,6 +516,7 @@ class RuntimeState:
         return self._event.wait(timeout)
 
 RUNTIME = RuntimeState()
+_context_memory = ContextMemory()
 
 # ========== GLOBAL STATE & LOCKS ==========
 _candle_cache: Dict[str, Tuple[List[dict], float]] = {}
@@ -2086,6 +2177,97 @@ def get_all_regimes() -> Tuple[str, str, str]:
     with _regimes_cache_lock:
         _regimes_cache.update({"market": market, "volatility": vol, "flow": flow, "ts": time.time()})
     return market, vol, flow
+
+# ========== PHASE 1 — REGIME INTERPRETATION ==========
+
+def interpret_regime_v10(coin: str = "BTC") -> RegimeInterpretation:
+    candles = get_candles(coin, "1h", 100)
+    if not candles or len(candles) < 30:
+        return RegimeInterpretation("UNKNOWN", 0, 0, 0, 0, 0, "NONE", False, 0)
+
+    closes = [float(c['c']) for c in candles[-30:]]
+    highs = [float(c['h']) for c in candles[-30:]]
+    lows = [float(c['l']) for c in candles[-30:]]
+
+    ema8 = np.mean(closes[-8:])
+    ema21 = np.mean(closes[-21:])
+    trend_diff = (ema8 - ema21) / max(ema21, 0.01) * 100
+    trend_strength = min(100, max(0, abs(trend_diff) * 20))
+
+    range_pct = (max(highs[-5:]) - min(lows[-5:])) / max(closes[-1], 0.01) * 100
+    range_factor = min(100, range_pct * 20)
+    trend_factor = 100 - range_factor
+
+    changes = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
+    consistency = abs(changes / len(closes) - 0.5) * 200
+    stability = min(100, max(0, consistency))
+
+    age_minutes = 0
+    for i in range(1, len(candles)):
+        if (closes[-i] > closes[-i-1]) != (closes[-1] > closes[-2]):
+            break
+        age_minutes += 60
+
+    vol_spike = get_volume_spike(coin)
+    oi_roc = get_oi_roc(coin)
+    delta_shift = get_delta_shift(coin)
+
+    trans_score = 0.0
+    if vol_spike > 2.0:
+        trans_score += 30
+    if abs(oi_roc) > 5:
+        trans_score += 25
+    if abs(delta_shift) > 6:
+        trans_score += 25
+    if abs(trend_diff) < 0.5 and range_pct < 1:
+        trans_score += 20
+    trans_prob = min(100, trans_score)
+
+    if trend_diff > 1.5:
+        regime = "TRENDING_UP"
+        direction = "TO_DOWN" if trans_prob > 70 else "TO_UP"
+    elif trend_diff < -1.5:
+        regime = "TRENDING_DOWN"
+        direction = "TO_UP" if trans_prob > 70 else "TO_DOWN"
+    else:
+        regime = "RANGING"
+        direction = "TO_UP" if trend_diff > 0.5 else "TO_DOWN"
+
+    is_breaking = False
+    breaking_strength = 0.0
+    if trans_prob > 60:
+        recent_high = max(highs[-5:])
+        recent_low = min(lows[-5:])
+        price = closes[-1]
+        if regime == "RANGING":
+            if price > recent_high * 1.002:
+                is_breaking = True
+                breaking_strength = min(100, (price / recent_high - 1) * 5000)
+            elif price < recent_low * 0.998:
+                is_breaking = True
+                breaking_strength = min(100, (1 - price / recent_low) * 5000)
+
+    agree = 0
+    if (regime == "TRENDING_UP" and trend_diff > 0) or (regime == "TRENDING_DOWN" and trend_diff < 0):
+        agree += 1
+    if vol_spike < 1.5 and stability > 50:
+        agree += 1
+    if trans_prob < 30:
+        agree += 1
+    confidence = 50 + (agree / 3) * 40 + stability * 0.1
+    confidence = min(100, max(0, confidence))
+
+    return RegimeInterpretation(
+        regime=regime,
+        strength=trend_strength,
+        stability=stability,
+        confidence=confidence,
+        age_minutes=age_minutes,
+        transition_prob=trans_prob,
+        transition_direction=direction,
+        is_breaking=is_breaking,
+        breaking_strength=breaking_strength
+    )
     
 # ========== STRUCTURE DETECTION ==========
 def detect_swing_points(candles, lookback=3):
@@ -2147,6 +2329,123 @@ def get_structure_valid_separate(coin: str, master: Dict) -> Tuple[bool, bool]:
         return False, False
     bos_up, bos_down, choch = get_bos_and_choch(candles_1h, highs, lows)
     return bos_up or choch, bos_down or choch
+
+# ========== PHASE 1 — OB & FVG ASSESSMENT ==========
+
+def assess_ob_reaction_v10(coin: str, event: TradeEvent, candles: List[dict]) -> OBReaction:
+    if not candles:
+        return OBReaction(0, 0, 0, 0, 0, 0, 0)
+
+    touch_count = 0
+    first_touch = 0
+    last_touch = 0
+    reaction_strengths = []
+
+    price_low = event.price_low
+    price_high = event.price_high
+
+    for i, c in enumerate(candles):
+        low = float(c['l'])
+        high = float(c['h'])
+
+        if event.direction == "LONG":
+            touched = low <= price_low * 1.002
+        else:
+            touched = high >= price_high * 0.998
+
+        if touched:
+            touch_count += 1
+            if first_touch == 0:
+                first_touch = c.get('t', 0) / 1000
+            last_touch = c.get('t', 0) / 1000
+
+            if i + 3 < len(candles):
+                if event.direction == "LONG":
+                    move_pct = (float(candles[i+3]['c']) - price_low) / max(price_low, 0.01) * 100
+                    strength = min(100, max(0, move_pct * 50))
+                else:
+                    move_pct = (price_high - float(candles[i+3]['c'])) / max(price_high, 0.01) * 100
+                    strength = min(100, max(0, move_pct * 50))
+                reaction_strengths.append(strength)
+
+    if not reaction_strengths:
+        return OBReaction(0, 0, 0, 0, 0, 0, 20)
+
+    if len(candles) > 5:
+        first_price = float(candles[0]['c'])
+        last_price = float(candles[-1]['c'])
+        if event.direction == "LONG":
+            followthrough = min(100, max(0, (last_price - first_price) / max(first_price, 0.01) * 200))
+        else:
+            followthrough = min(100, max(0, (first_price - last_price) / max(first_price, 0.01) * 200))
+    else:
+        followthrough = 50
+
+    max_reaction = max(reaction_strengths)
+    avg_reaction = sum(reaction_strengths) / len(reaction_strengths)
+    confidence = 30 + avg_reaction * 0.3 + followthrough * 0.2 + min(50, touch_count * 10)
+    confidence = min(100, confidence)
+
+    return OBReaction(
+        touch_count=touch_count,
+        first_touch_time=first_touch,
+        last_touch_time=last_touch,
+        max_reaction_strength=max_reaction,
+        avg_reaction=avg_reaction,
+        followthrough=followthrough,
+        confidence=confidence
+    )
+
+def assess_fvg_quality_v10(coin: str, event: TradeEvent, candles: List[dict]) -> FVGQuality:
+    if not candles:
+        return FVGQuality(0, 0, 0, 0, 0, 0)
+
+    gap_low = event.price_low
+    gap_high = event.price_high
+    gap_size = (gap_high - gap_low) / max(gap_low, 0.01) * 100
+    size_score = min(100, gap_size * 200)
+
+    fill_ratio = getattr(event, 'fill_ratio', 0.0)
+    fill_time = getattr(event, 'fill_time_minutes', 30)
+    if fill_time < 1:
+        fill_speed = 100
+    elif fill_time < 5:
+        fill_speed = 80
+    elif fill_time < 15:
+        fill_speed = 50
+    elif fill_time < 30:
+        fill_speed = 30
+    else:
+        fill_speed = 10
+
+    idx = event.extra.get('idx', 0)
+    reaction = 50
+    if idx + 5 < len(candles):
+        if event.direction == "LONG":
+            move = (float(candles[idx+5]['c']) - gap_low) / max(gap_low, 0.01) * 100
+        else:
+            move = (gap_high - float(candles[idx+5]['c'])) / max(gap_high, 0.01) * 100
+        reaction = min(100, max(0, move * 100))
+
+    age_minutes = 0
+    if idx < len(candles):
+        age_minutes = (time.time() - candles[idx].get('t', 0) / 1000) / 60
+
+    quality = 0
+    quality += size_score * 0.25
+    quality += (1 - fill_ratio) * 30
+    quality += (100 - fill_speed) * 0.2
+    quality += reaction * 0.25
+    quality = min(100, max(0, quality))
+
+    return FVGQuality(
+        size=size_score,
+        fill_ratio=fill_ratio,
+        fill_speed=fill_speed,
+        reaction=reaction,
+        age_minutes=age_minutes,
+        quality_score=quality
+    )
 
 def get_bias_4h_advanced(coin: str) -> Tuple[str, float, float]:
     candles = get_candles(coin, "4h", 25)
@@ -2521,6 +2820,64 @@ def update_decision_energy_history(coin: str, decision_energy: float):
 def compute_confidence_from_score(score: int, data_confidence: int, evidence_families: int) -> float:
     conf = score * 0.7 + data_confidence * 0.2 + min(100, (evidence_families / 3) * 100) * 0.1
     return min(100.0, conf)
+
+# ========== PHASE 1 — CONFIDENCE CALIBRATION ==========
+
+def calibrate_confidence_v10(coin: str, raw_confidence: float) -> CalibratedConfidence:
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''SELECT final_score, outcome FROM signals 
+                     WHERE coin = ? AND evaluated = 1 
+                     ORDER BY timestamp DESC LIMIT 100''', (coin,))
+        rows = c.fetchall()
+        conn.close()
+
+        if len(rows) < 10:
+            conn2 = db_connect()
+            c2 = conn2.cursor()
+            c2.execute('''SELECT final_score, outcome FROM signals 
+                          WHERE evaluated = 1 
+                          ORDER BY timestamp DESC LIMIT 500''')
+            rows = c2.fetchall()
+            conn2.close()
+
+        if len(rows) < 10:
+            return CalibratedConfidence(raw_confidence, raw_confidence, 1.0, len(rows), time.time())
+
+        buckets = {}
+        for score, outcome in rows:
+            bucket = int(score / 10) * 10
+            if bucket not in buckets:
+                buckets[bucket] = {'total': 0, 'wins': 0}
+            buckets[bucket]['total'] += 1
+            if outcome in ('TP_HIT', 'PARTIAL_WIN'):
+                buckets[bucket]['wins'] += 1
+
+        closest_bucket = min(buckets.keys(), key=lambda x: abs(x - raw_confidence))
+        bucket_data = buckets[closest_bucket]
+        win_rate = bucket_data['wins'] / max(1, bucket_data['total'])
+        calibrated = win_rate * 100
+
+        sample_size = bucket_data['total']
+        if sample_size < 20:
+            calibration_factor = max(0.5, sample_size / 40)
+        else:
+            calibration_factor = 1.0
+
+        final_calibrated = raw_confidence * (1 - calibration_factor * 0.3) + calibrated * (calibration_factor * 0.3)
+        final_calibrated = min(100, max(0, final_calibrated))
+
+        return CalibratedConfidence(
+            raw=raw_confidence,
+            calibrated=final_calibrated,
+            calibration_factor=calibration_factor,
+            sample_size=sample_size,
+            last_update=time.time()
+        )
+    except Exception as e:
+        logger.error(f"Calibrate confidence error: {e}")
+        return CalibratedConfidence(raw_confidence, raw_confidence, 1.0, 0, time.time())
 
 def compute_opportunity(rr: float, vol_spike: float, momentum: int) -> float:
     rr_score = min(60.0, max(0, rr) * 20)
@@ -4351,6 +4708,99 @@ def check_entry_alert_v10(coin: str, mark: float, master_candles: Dict) -> Optio
         logger.error(f"Entry error {coin}: {e}")
         return None
 
+# ========== PHASE 1 — ENTRY CHECK UPGRADED ==========
+
+def check_entry_alert_v10_phase1(coin: str, mark: float, master_candles: Dict) -> Optional[dict]:
+    """V10 + Phase 1 upgrades: regime interpretation, OB/FVG assessment, confidence calibration"""
+    try:
+        # 1. Regime (upgraded)
+        regime = interpret_regime_v10(coin)
+
+        # 2. Context memory
+        ctx = get_context_snapshot(coin)
+        _context_memory.add(ctx)
+
+        # 3. Standard observe
+        obs = observe_market(coin, mark, master_candles)
+        if not obs:
+            return None
+
+        # 4. Thesis
+        thesis_data = build_thesis(obs)
+        if not thesis_data:
+            return None
+
+        # 5. Confidence
+        confidence_data = compute_confidence(thesis_data)
+        if not confidence_data:
+            return None
+
+        # 6. OB / FVG assessment
+        event = thesis_data.get('event')
+        ob_reaction = None
+        fvg_quality = None
+        if event:
+            if event.type in ("OB", "OB_FLOW"):
+                candles_1h = get_candles(coin, "1h", 60, master_candles)
+                if candles_1h:
+                    ob_reaction = assess_ob_reaction_v10(coin, event, candles_1h)
+                    if ob_reaction.is_strong():
+                        confidence_data['confidence'] = min(100, confidence_data['confidence'] + 10)
+                    else:
+                        confidence_data['confidence'] = max(0, confidence_data['confidence'] - 15)
+            elif event.type in ("FVG", "FVG_FLOW"):
+                candles_1h = get_candles(coin, "1h", 60, master_candles)
+                if candles_1h:
+                    fvg_quality = assess_fvg_quality_v10(coin, event, candles_1h)
+                    if fvg_quality.quality_score > 60:
+                        confidence_data['confidence'] = min(100, confidence_data['confidence'] + 5)
+                    else:
+                        confidence_data['confidence'] = max(0, confidence_data['confidence'] - 10)
+
+        # 7. Calibrate confidence
+        cal = calibrate_confidence_v10(coin, confidence_data['confidence'])
+        confidence_data['confidence_calibrated'] = cal.calibrated
+        confidence_data['calibration_factor'] = cal.calibration_factor
+        confidence_data['calibration_samples'] = cal.sample_size
+
+        # 8. Execute decision
+        result = execute_decision(
+            coin, thesis_data, confidence_data,
+            thesis_data["event"], thesis_data["intent"], thesis_data["intent_legacy"]
+        )
+
+        if result:
+            # Attach upgrade data
+            result['regime_interpretation'] = regime
+            result['ob_reaction'] = ob_reaction
+            result['fvg_quality'] = fvg_quality
+            result['context_memory'] = _context_memory
+            result['confidence_calibrated'] = cal.calibrated
+            result['calibration_samples'] = cal.sample_size
+
+            # Trace
+            trace = DecisionTrace(
+                timestamp=time.time(),
+                coin=coin,
+                event_type=result["area"],
+                belief_state=result["belief_state"],
+                confidence=cal.calibrated,
+                decision_energy=result["decision_energy"],
+                final_decision="EXECUTE",
+                reasons=result["positive_evidence"],
+                why_not=[result["why_not"]] if result["why_not"] else [],
+                what_changed=f"regime:{regime.regime}|trans:{regime.transition_prob:.0f}%|cal:{cal.calibrated:.0f}%",
+                context_age=result.get("context_age", 0.0),
+                execution_mode=result.get("execution_mode_v10", "NORMAL")
+            )
+            log_decision_trace(trace)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Entry error {coin}: {e}")
+        return None
+
 def evaluate_signal_v7(signal_id, coin, direction, entry, sl, tp, data_confidence,
                        entropy_market, evidence_families, exhaustion, thesis, invalidate, observe, eval_delay,
                        predicted_zone_low, predicted_zone_high, predicted_direction):
@@ -4598,7 +5048,7 @@ def state_engine_update_v10():
                 logger.warning(f"⏳ API cooldown, skipping {coin}")
                 continue
             
-            alert = check_entry_alert_v10(coin, mark, master_candles)
+            alert = check_entry_alert_v10_phase1(coin, mark, master_candles)
             if alert and not PAPER_MODE:
                 alerts.append(alert)
             elif alert and PAPER_MODE:
@@ -4882,10 +5332,18 @@ def send_alert_v10(alert: dict):
             _alert_history[coin] = deque(maxlen=5)
         _alert_history[coin].append(now)
 
+    # --- Ambil data Phase 1 ---
+    regime = alert.get('regime_interpretation')
+    ob_reaction = alert.get('ob_reaction')
+    fvg_quality = alert.get('fvg_quality')
+    context_memory = alert.get('context_memory')
+    cal_conf = alert.get('confidence_calibrated', alert.get('score', 50))
+    cal_samples = alert.get('calibration_samples', 0)
+
+    # --- Mulai build text ---
     arrow = "🟢" if alert["direction"] == "LONG" else "🔴"
     belief_emoji = {"seeking":"🔍","building":"🏗️","convicted":"⚡","executing":"🚀","invalidated":"❌"}.get(alert.get("belief_state", "seeking"), "❓")
     pressure_emoji = {"low":"🐢","normal":"⚖️","urgent":"⏰"}.get(alert.get("time_pressure", "normal"), "⚖️")
-
     mode_v10 = alert.get("execution_mode_v10", "NORMAL")
     mode_emoji_v10 = get_mode_emoji(ExecutionMode(mode_v10.lower()))
     mode_color_v10 = get_mode_color(ExecutionMode(mode_v10.lower()))
@@ -4893,7 +5351,6 @@ def send_alert_v10(alert: dict):
     weights = {"A": alert.get("mode_aggressive", 0), "B": alert.get("mode_balanced", 1), "P": alert.get("mode_precision", 0)}
     mode_emoji = "⚡" if weights["A"] > 0.5 else ("🎯" if weights["P"] > 0.5 else "⚖️")
     mode_bar = ("█"*10+"░░░░") if weights["A"] > 0.5 else ("░░░░"+"█"*10) if weights["P"] > 0.5 else ("░░"+"█"*6+"░░")
-
     intent_emoji = {"seek_liquidity":"🦈","trap":"🪤","continue":"➡️","accept":"🟰","distribute":"📤"}.get(alert.get("intent_type", ""), "📍")
 
     size = alert.get("position_size_mult", 1.0)
@@ -4907,7 +5364,6 @@ def send_alert_v10(alert: dict):
 
     commit = alert.get("commitment_score", 0)
     commit_bar = "█" * int(commit / 10) + "░" * (10 - int(commit / 10))
-
     context_age = alert.get("context_age", 0)
     context_warn = "⚠️" if context_age > 3 else ""
 
@@ -4919,6 +5375,50 @@ def send_alert_v10(alert: dict):
     reaction_mode = alert.get("reaction_mode", "NORMAL")
     reaction_info = f"⚡ Reaction: {reaction_mode}" if reaction_mode != "NORMAL" else ""
 
+    # === REGIME SECTION ===
+    regime_text = ""
+    if regime:
+        regime_text = (
+            f"📈 *Regime*: {regime.regime}\n"
+            f"├─ Strength: {regime.strength:.0f}% | Stability: {regime.stability:.0f}%\n"
+            f"├─ Confidence: {regime.confidence:.0f}% | Age: {regime.age_minutes:.0f}m\n"
+            f"└─ Transition: {regime.transition_prob:.0f}% {regime.transition_direction}"
+        )
+
+    # === OB REACTION ===
+    ob_text = ""
+    if ob_reaction and ob_reaction.touch_count > 0:
+        ob_text = (
+            f"📊 *OB Reaction*\n"
+            f"├─ Touches: {ob_reaction.touch_count}\n"
+            f"├─ Max reaction: {ob_reaction.max_reaction_strength:.0f}%\n"
+            f"├─ Followthrough: {ob_reaction.followthrough:.0f}%\n"
+            f"└─ Confidence: {ob_reaction.confidence:.0f}%"
+        )
+
+    # === FVG QUALITY ===
+    fvg_text = ""
+    if fvg_quality and fvg_quality.quality_score > 0:
+        fvg_text = (
+            f"📊 *FVG Quality*\n"
+            f"├─ Size: {fvg_quality.size:.0f}%\n"
+            f"├─ Fill: {fvg_quality.fill_ratio:.0%} (speed: {fvg_quality.fill_speed:.0f}%)\n"
+            f"├─ Reaction: {fvg_quality.reaction:.0f}%\n"
+            f"└─ Quality: {fvg_quality.quality_score:.0f}"
+        )
+
+    # === CONTEXT MEMORY ===
+    ctx_text = ""
+    if context_memory and context_memory.snapshots:
+        ctx_text = (
+            f"🧠 *Context Memory*\n"
+            f"├─ Regimes: {' → '.join(context_memory.get_regime_sequence()[-5:])}\n"
+            f"├─ Shock trend: {context_memory.get_trend('shock_score')}\n"
+            f"├─ Volatility trend: {context_memory.get_volatility_trend()}\n"
+            f"└─ Transitioning: {'Yes' if context_memory.is_transitioning() else 'No'}"
+        )
+
+    # === WHY NOW ===
     why_now = ""
     if mode_v10 == "AGGRESSIVE":
         why_now = "⚡ *WHY NOW*: Market reaction strong + low entropy\n"
@@ -4933,6 +5433,7 @@ def send_alert_v10(alert: dict):
     elif alert.get("time_pressure") == "urgent":
         why_now = "⏰ *WHY NOW*: Time Pressure = URGENT (opportunity fading)\n"
 
+    # === BUILD FINAL TEXT ===
     text = f"""
 {arrow} {mode_emoji} *V10 ALERT* • {coin} {intent_emoji}
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -4971,6 +5472,13 @@ Context age: {context_age:.1f}s {context_warn}
 ├─ Positive: {', '.join(alert.get('positive_evidence', []))}
 ├─ Negative: {alert.get('negative_evidence', 'none')}
 └─ Why Not: {alert.get('why_not', 'no deterrents')}
+
+{regime_text + '\n' if regime_text else ''}
+{ob_text + '\n' if ob_text else ''}
+{fvg_text + '\n' if fvg_text else ''}
+{ctx_text + '\n' if ctx_text else ''}
+
+🎯 *Confidence Calibrated*: {cal_conf:.0f}% (raw: {alert.get('score', 0)}%, samples: {cal_samples})
 
 {why_now}
 {alert.get('explanation', '')}
