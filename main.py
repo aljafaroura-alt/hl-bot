@@ -3154,6 +3154,9 @@ def get_failed_move_risk(coin, event_type, delta, vol_spike, clarity, intent, di
             else:
                 return {"risk": 0.9, "reason": best_reason or "similar failed setup (price distant)"}
         return {"risk": 1.0, "reason": None}
+# ============================================================
+# PART 34.5 – HIDDEN LIQUIDITY (UPDATED)
+# ============================================================
 
 def compute_hidden_liquidity(coin: str, candles_5m: list, delta_history: list,
                               oi_history: list) -> dict:
@@ -3177,15 +3180,19 @@ def compute_hidden_liquidity(coin: str, candles_5m: list, delta_history: list,
     oi_count = len(oi_history)
     candle_count = len(candles_5m) if candles_5m else 0
 
-    # Coverage: berapa banyak data yang tersedia
-    coverage = (
-        min(1.0, delta_count / 5) *
-        min(1.0, oi_count / 5) *
-        min(1.0, candle_count / 20)
-    )
+    # Coverage: GEOMETRIC MEAN (lebih adil)
+    if candle_count > 0 and delta_count > 0 and oi_count > 0:
+        coverage = (
+            min(1.0, delta_count / 5) *
+            min(1.0, oi_count / 5) *
+            min(1.0, candle_count / 20)
+        ) ** (1/3)
+    else:
+        coverage = 0.0
     result["confidence"] = round(coverage, 2)
 
     if candle_count < 6 or delta_count < 3 or oi_count < 3:
+        result["status"] = "INSUFFICIENT"
         return result
 
     # ===== PRICE MOVE =====
@@ -3239,7 +3246,6 @@ def compute_hidden_liquidity(coin: str, candles_5m: list, delta_history: list,
         else:
             break
 
-    # Decayed persistence: 1 candle = 0.5, 2 = 0.8, 3+ = 1.0
     if persistence >= 3:
         persist_score = 1.0
     elif persistence >= 2:
@@ -3259,22 +3265,27 @@ def compute_hidden_liquidity(coin: str, candles_5m: list, delta_history: list,
         20 * oi_score
     )
 
-    # ===== APPLY CONFIDENCE WEIGHT =====
-    # Kalau coverage rendah, diskon score
+    # ===== APPLY CONFIDENCE WEIGHT (Geometric Mean) =====
     weighted_score = raw_score * coverage
     score = min(100, int(weighted_score))
     result["score"] = score
 
-    # ===== SIDE (tiered, not binary) =====
+    # ===== STATUS (Baru) =====
     if score >= 60:
-        delta_side = "BUYER" if delta_history[-1] > 0 else "SELLER"
-        result["side"] = f"{delta_side}_ABSORBING"
+        result["side"] = "ABSORBING"
+        result["status"] = "🧊 ABSORBING"
     elif score >= 35:
-        result["side"] = "POSSIBLE_ABSORPTION"
+        result["side"] = "WATCH"
+        result["status"] = "👀 WATCH"
+    elif score > 0:
+        result["side"] = "WEAK"
+        result["status"] = "⚪ WEAK"
     else:
         result["side"] = "NONE"
+        result["status"] = "⏸️ NONE"
 
     return result
+
 
 def compute_micro_acceptance(coin: str, event: TradeEvent, candles_5m: List[dict]) -> Dict[str, Any]:
     if not candles_5m or len(candles_5m) < 5:
@@ -6302,6 +6313,8 @@ def cmd_start(m):
 📅 Event Risk + Expectation
 🧠 Intent Memory
 📊 5 Execution Modes
+🧊 Hidden Liquidity Detector
+📈 Decision Journal
 
 📡 *Market Snapshot*
 ├─ Regime: {ctx.regime}
@@ -6325,8 +6338,47 @@ def cmd_start(m):
 
 ⏰ {get_wib()}
 
-✅ /status /entry BTC /warroom BTC /analytics /journal /belief /fatigue /prediction /traces /health /intel
-✅ /context /shock /breath /events /setevent /reaction /intent
+━━━━━━━━━━━━━━━━━━━━━━
+📌 *COMMANDS*
+
+🔍 *Analysis*
+/context   - Market context snapshot
+/shock     - Shock & tension metrics
+/breath    - Advanced market breath
+/reaction  - Latest reaction data
+/intent    - Intent memory per coin
+
+🎯 *Entry & Signals*
+/entry     - Check entry for a coin (e.g., /entry BTC)
+/warroom   - Full warroom analysis for a coin
+/stopalert - Toggle alerts ON/OFF
+
+📊 *Performance*
+/analytics - Win rate & PnL stats
+/journal   - Recent decision journal
+/traces    - Decision traces (why we did what)
+/prediction - Prediction quality per coin
+
+🧠 *Psychology*
+/belief    - Belief state per coin
+/fatigue   - Fatigue penalty per family
+/intel     - Intelligence metrics (accuracy, precision)
+
+🩺 *System*
+/status    - Full system status
+/health    - Bot health & cache stats
+/debug     - Deep debug for a coin (e.g., /debug BTC)
+
+📅 *Event Management*
+/events    - List all active events
+/setevent  - Set an event risk (admin only)
+
+━━━━━━━━━━━━━━━━━━━━━━
+💡 *Quick Start*
+1. /status           - Check if system is healthy
+2. /context          - Understand market regime
+3. /entry BTC        - Check for setups
+4. /journal          - See what we've been doing
 """
     bot.reply_to(m, text, parse_mode='Markdown')
 
@@ -6583,16 +6635,18 @@ def cmd_traces(m):
 # ============================================================
 # PART 40 – BOT COMMANDS (Status, Analytics, Entry, Warroom, Stopalert, Health, Intel)
 # ============================================================
-
 @bot.message_handler(commands=['status'])
 def cmd_status(m):
     conn = db_connect()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM signals WHERE timestamp > ?", (int(time.time()) - 86400,))
-    today = c.fetchone()[0]
+    today_signals = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM journal WHERE executed=1 AND timestamp > ?", (int(time.time()) - 86400,))
     alerts_sent = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM signals WHERE evaluated=1")
+    total_evaluated = c.fetchone()[0]
     conn.close()
+    
     pred_q = get_prediction_quality_multiplier("BTC")
     market = get_all_regimes()
     ctx = get_context_snapshot("BTC")
@@ -6601,10 +6655,32 @@ def cmd_status(m):
     reaction = get_current_reaction()
     reaction_text = reaction.event if reaction else "None"
     absorption_text = f"{reaction.absorption*100:.0f}%" if reaction else "N/A"
+    
     with _market_sanity_lock:
         sane = "🟢 SANE" if _market_sanity["is_sane"] else "🔴 CHAOS"
+    
     regime, penalty = get_regime_with_inertia("BTC")
     mode = get_execution_mode_v10(ctx, reaction, 0.5, event_adj)[0].value.upper()
+    
+    # Journal size
+    with _journal_lock:
+        journal_size = len(_decision_journal)
+    
+    # Active candidates
+    with _active_candidates_lock:
+        active_count = len(_active_candidates)
+    
+    # Pending setups
+    with _pending_setups_lock:
+        pending_count = len(_pending_setups)
+    
+    # Cache stats
+    cache_size = CACHE.size()
+    
+    # Fatigue status
+    with _fatigue_memory_lock:
+        fatigue_families = len(_fatigue_memory)
+        fatigue_entries = sum(len(d) for d in _fatigue_memory.values())
 
     text = f"""
 📊 *STATUS V10 – REACTION ENGINE*
@@ -6616,27 +6692,48 @@ def cmd_status(m):
 📊 Regime: {regime} (inertia: {penalty:.0f}%)
 🎯 Mode: {mode}
 
-🌍 *Breath*
+━━━━━━━━━━━━━━━━━━━━━━
+🌍 *Market Breath*
 ├─ Bull: {breath['bull']*100:.0f}%
+├─ Bear: {breath['bear']*100:.0f}%
 ├─ Participation: {breath['participation']*100:.0f}%
+├─ Leadership: {breath['leadership']:+.1f}%
+├─ Dispersion: {breath['dispersion']:.2f}%
 └─ Rotation: {breath['rotation']:+.1f}%
 
-📅 *Event*
+📅 *Event Risk*
 ├─ Importance: {event_adj.get('importance', 0):.0f}%
+├─ Volatility: {event_adj.get('volatility', 0):.0f}%
 └─ Bias: {event_adj.get('bias', 0):+.0f}
 
-⚡ *Reaction*
+⚡ *Reaction Engine*
 ├─ Latest: {reaction_text}
-└─ Absorption: {absorption_text}
+├─ Absorption: {absorption_text}
+└─ Confidence: {confidence_text}
 
-📈 *Today*
-├─ Alerts: {alerts_sent}
-├─ Signals: {today}
+━━━━━━━━━━━━━━━━━━━━━━
+📈 *Performance*
+├─ Signals today: {today_signals}
+├─ Alerts sent: {alerts_sent}
+├─ Evaluated: {total_evaluated}
 └─ Prediction Quality: {pred_q:.2f}x
 
-⚙️ *System*
+📚 *System State*
+├─ Journal: {journal_size} entries
+├─ Active candidates: {active_count}
+├─ Pending setups: {pending_count}
+├─ Fatigue families: {fatigue_families} ({fatigue_entries} entries)
+└─ Cache: {cache_size} items
+
+⚙️ *Controls*
 ├─ Alert: {'🟢 ON' if RUNTIME.is_alert_enabled() else '🔴 OFF'}
 └─ Paper: {'📄 YES' if PAPER_MODE else '💎 NO'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+💡 *Next actions*
+/entry BTC      - Check BTC setup
+/journal        - View recent decisions
+/health         - Deep health check
 """
     bot.reply_to(m, text, parse_mode='Markdown')
 
@@ -6800,34 +6897,62 @@ def cmd_stopalert(m):
     else:
         RUNTIME.enable_alerts()
         bot.reply_to(m, "🟢 Alert ON")
-
+        
 @bot.message_handler(commands=['health'])
 def cmd_health(m):
     if m.from_user.id != USER_ID:
+        bot.reply_to(m, "⛔ Admin only command")
         return
+    
     mem = f"{psutil.Process().memory_percent():.1f}%" if HAS_PSUTIL else "N/A"
     cpu = f"{psutil.cpu_percent():.1f}%" if HAS_PSUTIL else "N/A"
-    with _candle_lock: cache_sz = len(_candle_cache)
-    with _active_candidates_lock: active_sz = len(_active_candidates)
-    with _pending_setups_lock: pending_sz = len(_pending_setups)
-    with _market_sanity_lock: sane = "🟢" if _market_sanity["is_sane"] else "🔴"
-    with _hypothesis_lock: hyp_sz = len(_hypothesis_store)
+    
+    with _candle_lock: 
+        candle_cache_sz = len(_candle_cache)
+    with _active_candidates_lock: 
+        active_sz = len(_active_candidates)
+    with _pending_setups_lock: 
+        pending_sz = len(_pending_setups)
+    with _market_sanity_lock: 
+        sane = "🟢" if _market_sanity["is_sane"] else "🔴"
+        sanity_reason = _market_sanity.get('reason', 'OK')
+    with _hypothesis_lock: 
+        hyp_sz = len(_hypothesis_store)
     with _trace_lock:
         trace_sz = len(_decision_traces)
-        last_trace =list( _decision_traces)[-1] if _decision_traces else None
+        last_trace = list(_decision_traces)[-1] if _decision_traces else None
+    with _journal_lock:
+        journal_sz = len(_decision_journal)
+    with _intent_memory_lock:
+        intent_coins = len(_intent_memory)
+        intent_entries = sum(len(d) for d in _intent_memory.values())
+    with _belief_state_lock:
+        belief_coins = len(_belief_state)
+    with _fatigue_memory_lock:
+        fatigue_families = len(_fatigue_memory)
+        fatigue_entries = sum(len(d) for d in _fatigue_memory.values())
+    with _event_risk_lock:
+        event_count = len(_EVENT_RISK_DATA)
+    with _intent_vector_lock:
+        vector_coins = len(_intent_vector_history)
+    
     ctx = get_context_snapshot("BTC")
     now = time.time()
     with _snapshot_lock:
         snap_age = f"{now - _last_snapshot.timestamp:.1f}s" if _last_snapshot else "N/A"
+    
     decision_latency = f"{now - last_trace.timestamp:.1f}s" if last_trace and hasattr(last_trace,'timestamp') else "N/A"
     belief_drift = _compute_belief_drift()
+    
     with _bot_health_lock:
         bot_st = _bot_health["state"].value.upper()
         bot_fail = _bot_health["failures"]
         bot_reason = _bot_health["reason"] or "OK"
+    
     db_queue_sz = _db_queue.qsize()
     with _CONTEXT_CACHE_LOCK:
         ctx_cache_sz = len(_CONTEXT_CACHE)
+    
     intel = get_intelligence_metrics()
     regime, penalty = get_regime_with_inertia("BTC")
     reaction = get_current_reaction()
@@ -6835,25 +6960,44 @@ def cmd_health(m):
     event_adj = get_event_risk_adjustment()
     mode = get_execution_mode_v10(ctx, reaction, 0.5, event_adj)[0].value.upper()
     
-    # ========== CACHE MANAGER STATS ==========
+    # Cache Manager stats
     cache_size = CACHE.size()
     cache_keys = ", ".join(CACHE.keys()[:10]) if cache_size > 0 else "empty"
+    
+    # Data freshness
+    with _last_mids_lock:
+        btc_price_ts = _last_mids.get("BTC", (0, 0))[1]
+        price_age = f"{(now - btc_price_ts):.1f}s" if btc_price_ts > 0 else "N/A"
 
     text = f"""
 🩺 *HEALTH V10 – PRODUCTION*
 ━━━━━━━━━━━━━━━━━━━━━━
 🖥️ CPU: {cpu} | RAM: {mem}
 🧵 Threads: {threading.active_count()}
+📡 BTC Price Age: {price_age}
 
-📦 *Cache*
-├─ Candles: {cache_sz} | Ctx: {ctx_cache_sz}
+━━━━━━━━━━━━━━━━━━━━━━
+📦 *Cache & Memory*
+├─ Candles: {candle_cache_sz} | Context: {ctx_cache_sz}
 ├─ Hypotheses: {hyp_sz}
-├─ DB queue: {db_queue_sz}
-├─ CacheManager items: {cache_size}
-├─ CacheManager keys: {cache_keys[:60]}{'...' if len(cache_keys) > 60 else ''}
-🎯 Active: {active_sz} | Pending: {pending_sz}
-📝 Traces: {trace_sz}
+├─ Journal: {journal_sz} entries
+├─ Traces: {trace_sz}
+├─ CacheManager: {cache_size} items
+├─ Cache keys: {cache_keys[:80]}{'...' if len(cache_keys) > 80 else ''}
+└─ DB Queue: {db_queue_sz}
 
+━━━━━━━━━━━━━━━━━━━━━━
+🧠 *State Tracking*
+├─ Active candidates: {active_sz}
+├─ Pending setups: {pending_sz}
+├─ Belief states: {belief_coins} coins
+├─ Intent memory: {intent_coins} coins ({intent_entries} entries)
+├─ Intent vectors: {vector_coins} coins
+├─ Fatigue families: {fatigue_families} ({fatigue_entries} entries)
+├─ Events: {event_count} active
+└─ Sanity: {sane} | {sanity_reason[:60]}
+
+━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *Context (BTC)*
 ├─ Shock: {ctx.shock_score:.0f}% | Transition: {ctx.transition_prob:.0f}%
 ├─ Tension: {ctx.tension:.0f}% | Snap age: {snap_age}
@@ -6861,28 +7005,25 @@ def cmd_health(m):
 ├─ Mode: {mode}
 └─ Decision latency: {decision_latency}
 
-🌍 *Market*
-├─ Breath Bull: {breath['bull']*100:.0f}%
-├─ Participation: {breath['participation']*100:.0f}%
-└─ Rotation: {breath['rotation']:+.1f}%
-
-📅 *Events*
-├─ Importance: {event_adj.get('importance', 0):.0f}%
-└─ Bias: {event_adj.get('bias', 0):+.0f}
-
+━━━━━━━━━━━━━━━━━━━━━━
 🤖 *Bot Health*
 ├─ State: {bot_st} | Failures: {bot_fail}
-└─ Reason: {bot_reason[:60]}
+└─ Reason: {bot_reason[:80]}
 
 📊 *Intelligence*
 ├─ Transition Acc: {intel['transition_accuracy']:.0f}%
 ├─ Shock Precision: {intel['shock_precision']:.0f}%
 ├─ Prep Recall: {intel['preparation_recall']:.0f}%
 ├─ Decision Consistency: {intel['decision_consistency']:.0f}%
-├─ Belief drift: {belief_drift:.2f}
-└─ Sanity: {sane} | {_market_sanity.get('reason','OK')}
+├─ Belief Drift: {belief_drift:.2f}
+└─ Execution Precision: {intel['execution_precision']:.1f}%
 
+━━━━━━━━━━━━━━━━━━━━━━
 ✅ Running: {RUNTIME.is_running()}
+📄 Paper: {'YES' if PAPER_MODE else 'NO'}
+🔔 Alert: {'ON' if RUNTIME.is_alert_enabled() else 'OFF'}
+
+💡 /debug BTC for deep dive
 """
     bot.reply_to(m, text, parse_mode='Markdown')
 
@@ -6957,7 +7098,8 @@ def cmd_debug(m):
         candles_5m = get_candles(coin, "5m", 20, master)
 
         hl = compute_hidden_liquidity(coin, candles_5m, delta_history, oi_history) if candles_5m else {
-            "score": 0, "side": "NONE", "eff_score": 0, "vol_score": 0,
+            "score": 0, "side": "NONE", "status": "⏸️ NONE",
+            "eff_score": 0, "vol_score": 0,
             "persist_score": 0, "oi_score": 0, "confidence": 0
         }
 
@@ -6972,29 +7114,10 @@ def cmd_debug(m):
         text += f"🌍 Breath: Bull {breath['bull']*100:.0f}% | Part {breath['participation']*100:.0f}%\n"
 
         # ===== HIDDEN LIQUIDITY =====
-        text += f"\n🧊 *Hidden Liquidity*: {hl['score']}% ({hl['side']})\n"
+        text += f"\n🧊 *Hidden Liquidity*: {hl['score']}% ({hl['status']})\n"
         text += f"   ├─ Inputs: delta={len(delta_history)}/5, oi={len(oi_history)}/5, candles={len(candles_5m) if candles_5m else 0}\n"
         text += f"   ├─ Breakdown: eff={hl.get('eff_score',0):.2f} | vol={hl.get('vol_score',0):.2f} | persist={hl.get('persist_score',0):.2f} | oi={hl.get('oi_score',0):.2f}\n"
-        text += f"   ├─ Confidence: {hl.get('confidence',0)*100:.0f}%\n"
-
-        if hl['score'] >= 60:
-            text += f"   └─ Status: 🔴 HIGH (ABSORBING)"
-        elif hl['score'] >= 35:
-            text += f"   └─ Status: 🟡 MODERATE (POSSIBLE)"
-        elif hl['score'] > 0:
-            text += f"   └─ Status: ⚪ LOW (needs more data)"
-        else:
-            components = [
-                ("eff", hl.get('eff_score',0)),
-                ("vol", hl.get('vol_score',0)),
-                ("persist", hl.get('persist_score',0)),
-                ("oi", hl.get('oi_score',0)),
-            ]
-            weakest = min(components, key=lambda x: x[1])
-            if hl.get('confidence', 0) < 0.5:
-                text += f"   └─ Status: ⏸️ INSUFFICIENT DATA (conf={hl.get('confidence',0)*100:.0f}%)"
-            else:
-                text += f"   └─ Status: ⏸️ LOW ({weakest[0]}={weakest[1]:.2f} weakest)"
+        text += f"   └─ Confidence: {hl.get('confidence',0)*100:.0f}%\n"
 
         # ===== INTENT DRIFT =====
         text += f"\n📊 *Intent Drift*: {drift:.2f} (history: {vec_count}/4 min)"
@@ -7038,9 +7161,7 @@ def cmd_debug(m):
         tb = traceback.format_exc()
         if len(tb) > 4000:
             tb = tb[-4000:]
-        bot.reply_to(m, f"❌ *Error*\n```\n{tb}\n```", parse_mode='Markdown')
-
-    
+        bot.reply_to(m, f"❌ *Error*\n```\n{tb}\n```", parse_mode='Markdown')   
 
 # ============================================================
 # PART 41 – MAIN + SIGNAL HANDLER + GRACEFUL SHUTDOWN + PENDING SETUPS
