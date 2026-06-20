@@ -6491,6 +6491,15 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     decision_type = "EXECUTE"
     why_not_final = why_not
     shadow_registered = False
+                          # ===== DEBUG: EXECUTION DECISION POINT =====
+    logger.info(
+        f"🎯 EXEC DECISION {coin}: "
+        f"score={confidence_data.get('final_score', 0)}, "
+        f"threshold={final_threshold}, "
+        f"conviction={conviction_data.get('conviction', 0):.0f}, "
+        f"allow_entry={allow_entry}, "
+        f"micro_confirmed={micro_confirmed}"
+    )
 
     if confidence_data["final_score"] < final_threshold:
         score = confidence_data["final_score"]
