@@ -6039,21 +6039,25 @@ def get_delta_persistence(coin: str, direction: str, window: int = 3) -> bool:
 def get_velocity_score(coin: str, direction: str) -> Tuple[int, List[str]]:
     """
     Momentum acceleration validator (NOT predictor).
-    
-    Checks (weighted):
-    - Delta acceleration + persistence: 40
-    - Volume acceleration: 25
-    - OI impulse (z-score based): 20
-    - Delta persistence: 15
-    
-    Return: (velocity_score, reasons)
-    Scores: 75+ (aggressive), 60-75 (normal+), 40-60 (defensive), <40 (small)
     """
     velocity_score = 0
     reasons = []
     
-    # ===== SIGNAL 1: DELTA ACCELERATION + PERSISTENCE =====
+    # ===== AMBIL SEMUA INPUT SEKALI (untuk log) =====
     delta_shift = get_delta_shift(coin)
+    vol_spike = get_volume_spike(coin)
+    oi_z = get_oi_zscore(coin)
+    
+    # ===== INSTRUMENTATION LOG =====
+    logger.debug(
+        f"[VELOCITY INPUT {coin}] "
+        f"delta_shift={delta_shift:.2f}, "
+        f"vol_spike={vol_spike:.2f}, "
+        f"oi_z={oi_z:.2f}"
+    )
+    # ===================================
+    
+    # ===== SIGNAL 1: DELTA ACCELERATION + PERSISTENCE =====
     delta_accel = False
     
     delta_history = list(_rolling_delta.get(coin, deque()))
@@ -6064,6 +6068,9 @@ def get_velocity_score(coin: str, direction: str) -> Tuple[int, List[str]]:
         # Persistence: consistently in right direction
         delta_persist = get_delta_persistence(coin, direction, window=3)
         
+        # LOG persistence juga
+        logger.debug(f"[VELOCITY PERSIST {coin}] delta_persist={delta_persist}")
+        
         if (direction == "LONG" and d_slope > 0.5 and delta_persist) or \
            (direction == "SHORT" and d_slope < -0.5 and delta_persist):
             velocity_score += 40
@@ -6071,19 +6078,18 @@ def get_velocity_score(coin: str, direction: str) -> Tuple[int, List[str]]:
             delta_accel = True
     
     # ===== SIGNAL 2: VOLUME ACCELERATION =====
-    vol_spike = get_volume_spike(coin)
-    if vol_spike > 1.2:  # 20% above avg = acceleration
+    vol_spike = get_volume_spike(coin)  # ← HAPUS baris ini (udah diambil di atas)
+    if vol_spike > 1.2:
         velocity_score += 25
         reasons.append(f"vol_accel_{vol_spike:.2f}")
     
-    # ===== SIGNAL 3: OI IMPULSE (Z-score based, adaptive) =====
-    oi_z = get_oi_zscore(coin)
-    if oi_z > 1.2:  # ~1 std dev above mean
+    # ===== SIGNAL 3: OI IMPULSE =====
+    oi_z = get_oi_zscore(coin)  # ← HAPUS baris ini (udah diambil di atas)
+    if oi_z > 1.2:
         velocity_score += 20
         reasons.append(f"oi_impulse_z{oi_z:.2f}")
     
-    # ===== SIGNAL 4: DELTA PERSISTENCE (bonus if already counted above, skip) =====
-    # Only count if accel already scored. Otherwise bonus.
+    # ===== SIGNAL 4: DELTA PERSISTENCE (bonus) =====
     if not delta_accel:
         delta_persist = get_delta_persistence(coin, direction, window=3)
         if delta_persist:
