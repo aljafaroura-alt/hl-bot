@@ -1446,7 +1446,7 @@ def save_signal_v7(signal_id, coin, direction, score, entry, sl, tp, rr, reason,
                       timestamp, data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
                       execution_mode, intent_type, decision_energy, position_size_mult, filter_score, 
                       intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (signal_id, coin, direction, score, entry, sl, tp, rr, reason, int(time.time()),
                    data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
                    execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
