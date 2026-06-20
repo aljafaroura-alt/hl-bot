@@ -1391,6 +1391,13 @@ def save_trace_to_db(trace: DecisionTrace):
             conn.close()
 
 
+def log_decision_trace(trace: DecisionTrace):
+    """Wrapper untuk save_trace_to_db, mencegah None."""
+    if trace is None:
+        return
+    return save_trace_to_db(trace)
+
+
 def log_context(ctx: ContextSnapshot):
     conn = None
     try:
