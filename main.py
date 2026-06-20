@@ -957,11 +957,9 @@ def get_adaptive_relaxation() -> int:
 
     return relax
 
-
 def log_velocity_observer(coin: str, event, candles_5m: List[dict]) -> None:
     """
     Velocity Observer: Logging only. Tidak mengubah keputusan.
-    Stage C: Observer pattern untuk understand momentum & acceptance speed.
     """
     if not TUNABLE.get("VELOCITY_ENABLED", True):
         return
@@ -971,22 +969,20 @@ def log_velocity_observer(coin: str, event, candles_5m: List[dict]) -> None:
     delta_score = 20
     if len(delta_queue) >= 3:
         delta_vals = list(delta_queue)
-        delta_slope = (delta_vals[-1] - delta_vals[-2]) / 60  # per menit
+        delta_slope = (delta_vals[-1] - delta_vals[-2]) / 60  
         if event.direction == "LONG" and delta_slope > 0:
             delta_score = min(100, abs(delta_slope) * 15)
         elif event.direction == "SHORT" and delta_slope < 0:
             delta_score = min(100, abs(delta_slope) * 15)
         else:
-            delta_score = min(100, abs(delta_slope) * 7)  # Penalty 50%
+            delta_score = min(100, abs(delta_slope) * 7)
 
     vol_spike = get_volume_spike(coin)
-    # FIX VOL-2: Lower threshold 0.8→0.5 (more responsive to volume increase)
     vol_score = min(100, max(0, (vol_spike - 0.5) * 50))
 
     oi_roc = get_oi_roc(coin)
     oi_score = min(100, max(20, 20 + (oi_roc / 5) * 16))
 
-    # Acceptance velocity (khusus liquidity)
     accept_score = 50
     if event.type == "LIQUIDITY" and candles_5m and len(candles_5m) >= 6:
         idx = event.extra.get("idx", len(candles_5m) - 3)
@@ -1000,12 +996,20 @@ def log_velocity_observer(coin: str, event, candles_5m: List[dict]) -> None:
                 break
         accept_score = 90 if reclaimed else 30
 
-    # FIX VOL-4: Debug volume spike
-    logger.debug(f"[VOL DEBUG {coin}] vol_spike={vol_spike:.2f} vol_score={vol_score:.0f}")
-
     composite = (delta_score * 0.4) + (vol_score * 0.3) + (oi_score * 0.15) + (accept_score * 0.15)
-    # FIX 5.2: Ensure composite >= 0 (safety clamp)
     composite = max(0, min(100, composite))
+    
+    # ===== INSTRUMENTATION: BREAKDOWN SCORING =====
+    logger.debug(
+        f"[VELOCITY SCORE {coin}] "
+        f"delta={delta_score:.0f}, "
+        f"vol={vol_score:.0f}, "
+        f"oi={oi_score:.0f}, "
+        f"accept={accept_score:.0f}, "
+        f"composite={composite:.0f}"
+    )
+    # ================================================
+    
     status = "URGENT" if composite > 75 else ("ACTIVE" if composite > 50 else "NORMAL")
 
     logger.debug(
