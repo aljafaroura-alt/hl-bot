@@ -5715,6 +5715,7 @@ def build_thesis(obs: Dict) -> Optional[Dict]:
         "vol_spike": obs["vol_spike"], "momentum": obs["momentum"],
         "funding_pct": obs["funding_pct"], "oi_roc": obs["oi_roc"],
         "delta": obs.get("delta", 0),  # FIX 3: Add missing delta key for execute_decision
+        "cvd_accel": obs.get("cvd_accel", False),
         "clustered": obs["clustered"], "ages": obs["ages"],
         "context": obs.get("context"),
         "bias_4h": bias_4h, "bias_strength": bias_strength, "bias_stability": bias_stability
