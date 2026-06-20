@@ -6442,6 +6442,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         why_not += " | OBSERVE mode: moderate drift, reduced size"
     else:
         mode_override = None
+        allow_entry = True
 
 
 
