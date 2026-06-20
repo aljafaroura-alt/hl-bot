@@ -1327,6 +1327,7 @@ def init_db():
             ("journal", "commitment_score", "REAL", "0.0"),
             ("journal", "time_pressure", "TEXT", "'normal'"),
             ("journal", "entropy_data", "INTEGER", "0"),
+            ("journal", "entropy_market", "INTEGER", "0"),
             ("signals", "final_score", "REAL", "0.0"),
             ("signals", "execution_mode", "TEXT", "'BALANCED'"),
             ("signals", "intent_type", "TEXT", "''"),
