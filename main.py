@@ -6132,6 +6132,11 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     belief = thesis_data["current_belief"]
     filter_score = thesis_data["filter_score"]
     fatigue_penalty = thesis_data["fatigue_penalty"]
+    
+    # ===== DEFAULTS (GUARD AGAINST UnboundLocalError) =====
+    allow_entry = True
+    mode_override = None
+    # =======================================================
 
     # ===== V10: AMBIL CONTEXT DENGAN CONFIDENCE-WEIGHTED CACHE =====
     context = thesis_data.get("context")
