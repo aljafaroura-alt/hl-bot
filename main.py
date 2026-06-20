@@ -2805,12 +2805,31 @@ def get_volume_spike(coin: str, master: Dict = None) -> float:
     candles = get_candles(coin, "5m", 30, master)
     if not candles or len(candles) < 6:
         return 1.0
+    
     price = float(candles[-1]['c'])
     cur = float(candles[-1]['v']) * price
+    
     # FIX VOL-1: Expand window from 5 to 12 candles for more stable baseline
     prev = [float(c['v']) * float(c['c']) for c in candles[-13:-1]]
     avg = sum(prev)/len(prev) if prev else 1.0
-    return cur / avg if avg > 0 else 1.0
+    ratio = cur / avg if avg > 0 else 1.0
+    
+    # ===== INSTRUMENTATION LOG =====
+    logger.debug(
+        f"[VOL RAW {coin}] "
+        f"cur={cur:.0f} "
+        f"avg={avg:.0f} "
+        f"ratio={ratio:.2f}"
+    )
+    
+    logger.debug(
+        f"[VOL UNIT {coin}] "
+        f"raw_v={candles[-1]['v']} "
+        f"close={candles[-1]['c']}"
+    )
+    # =================================
+    
+    return ratio
 
 def get_atr_pct(coin: str, period: int = 14, timeframe: str = "1h", master: Dict = None) -> float:
     candles = get_candles(coin, timeframe, period+5, master)
