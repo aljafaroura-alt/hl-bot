@@ -4,6 +4,7 @@
 # ============================================================
 # Filosofi: Baca MARKET REACTION, bukan baca berita
 # DNA: Market Interpretation → Market Anticipation
+# smart-adaptive-dynamic-aggressive
 # Owner: Cryptone 
 # ============================================================
 
