@@ -6729,25 +6729,59 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     adjusted_threshold = int(entropy_adjusted_threshold * threshold_boost * filter_penalty)
 
     size_boost = 1.0 + (1.0 - confidence_data["position_size_mult"]) * 0.2
-    
-    # ===== P2 FIX: ADAPTIVE THRESHOLD LOWERING =====
-    recent_wr = 0.5
+    # ===== P2 FIX: ADAPTIVE THRESHOLD LOWERING (FIXED + SAFE) =====
+    recent_wr = 0.5  # default netral
     try:
-        wins = sum(1 for e in list(_decision_journal)[-20] if e.outcome in ("TP_HIT", "PARTIAL_WIN"))
-        recent_wr = wins / max(1, len(list(_decision_journal)[-20]))
-    except:
+        recent_entries = (
+            list(_decision_journal)[-20:]
+            if len(_decision_journal) >= 20
+            else list(_decision_journal)
+        )
+        # Hanya closed executed trades (pakai getattr biar aman)
+        closed = [
+          e for e in recent_entries
+            if getattr(e, "executed", False)
+            and getattr(e, "outcome", None) is not None
+        ]
+        if closed:
+            wins = sum(1 for e in closed if e.outcome in ("TP_HIT", "PARTIAL_WIN"))
+            recent_wr = wins / len(closed)
+        # else: tetap 0.5
+    except Exception:
         recent_wr = 0.5
-    
+
     now_time = time.time()
-    hourly_exec = sum(1 for e in _decision_journal if e.signal_time > now_time - 3600 and e.status == "DECISION")
-    
+    hourly_exec = sum(
+        1 for e in _decision_journal
+        if getattr(e, "timestamp", 0) > now_time - 3600
+        and getattr(e, "executed", False)
+    )
+
     final_threshold = get_adaptive_threshold(
         market_regime=thesis_data.get("market_regime", "UNKNOWN"),
         entropy_market=confidence_data.get("entropy_market", 50),
         recent_win_rate=recent_wr,
         execution_count=hourly_exec
     )
+
+    # ===== REJECTION LOGGING (dengan regime) =====
+    if confidence_data["final_score"] < final_threshold:
+        score = confidence_data["final_score"]
+        gap = final_threshold - score
+        rr = confidence_data.get("rr", 0.0)
+        regime = thesis_data.get("market_regime", "UNKNOWN")
     
+        logger.info(
+            f"🚫 REJECT {coin} "
+            f"score={score:.1f} "
+            f"thr={final_threshold:.1f} "
+            f"gap={gap:.1f} "
+            f"rr={rr:.2f} "
+            f"regime={regime} "
+            f"reason={why_not_final}"
+        )
+    
+    # ... lanjut ke shadow registration & decision_type = REJECT (kode di bawah tetap sama)
     # ===== V10: BREATH ADJUSTMENT (Advanced) =====
     if breath_v10.get("participation", 0.5) < 0.4 and coin != "BTC":
         position_size_mult *= 0.7
