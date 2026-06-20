@@ -4122,7 +4122,7 @@ def log_decision_journal(entry: DecisionJournalEntry):
     with _journal_lock:
         _decision_journal.append(entry)
         if len(_decision_journal) > 2000:
-            _decision_journal = list(_decision_journal)[-2000:] 
+            del _decision_journal[:-2000] 
             
 def get_decision_journal(coin: str = None, mode: str = None, limit: int = 100) -> List[DecisionJournalEntry]:
     with _journal_lock:
