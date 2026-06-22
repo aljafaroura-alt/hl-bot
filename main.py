@@ -984,7 +984,7 @@ class DecisionTrace:
     what_changed: str
     context_age: float = 0.0
     execution_mode: str = "NORMAL"
-
+    
 @dataclass
 class DecisionJournalEntry:
     timestamp: float
@@ -1008,10 +1008,14 @@ class DecisionJournalEntry:
     intent_drift: float
     surprise: float
     narrative: Dict[str, str]
+    signal_id: Optional[str] = None       # ← NYALA! Buat match dengan TradeManager
     outcome: Optional[str] = None
     pnl: Optional[float] = None
     mfe: Optional[float] = None
     mae: Optional[float] = None
+    closed: bool = False                  # ← NYALA! Tracking status
+    close_reason: Optional[str] = None    # ← NYALA! Kenapa closed
+    duration_minutes: Optional[float] = None  # ← NYALA! Berapa lama posisi
 
 @dataclass
 class FailedMoveFingerprint:
@@ -1343,6 +1347,44 @@ _intent_pending: Dict[str, Dict[str, Any]] = {}
 _intent_pending_lock = threading.RLock()
 _INTENT_PENDING_TTL = 300  # 5 minutes
 
+def migrate_journal_entries():
+    """
+    Backfill missing fields on old journal entries.
+    Ensures backward compatibility with journal entries created before this patch.
+    
+    FUNGSI INI BERJALAN SEKALI DI STARTUP
+    """
+    global _decision_journal
+    
+    with _journal_lock:  # ← AMAN UNTUK MULTI-THREAD
+        migrated = 0
+        for entry in _decision_journal:  # ← LOOP SEMUA ENTRI
+            # CEK APAKAH FIELD signal_id ADA?
+            if not hasattr(entry, "signal_id"):
+                entry.signal_id = None  # ← KALO GA ADA, TAMBAHKAN
+                migrated += 1
+            
+            # CEK APAKAH FIELD closed ADA?
+            if not hasattr(entry, "closed"):
+                entry.closed = False  # ← KALO GA ADA, TAMBAHKAN
+                migrated += 1
+            
+            # CEK APAKAH FIELD close_reason ADA?
+            if not hasattr(entry, "close_reason"):
+                entry.close_reason = None  # ← KALO GA ADA, TAMBAHKAN
+                migrated += 1
+            
+            # CEK APAKAH FIELD duration_minutes ADA?
+            if not hasattr(entry, "duration_minutes"):
+                entry.duration_minutes = None  # ← KALO GA ADA, TAMBAHKAN
+                migrated += 1
+        
+        # LOG HASILNYA
+        if migrated > 0:
+            logger.info(f"✅ Backfilled {migrated} fields on {len(_decision_journal)} journal entries")
+        else:
+            logger.info(f"✅ No migration needed for {len(_decision_journal)} journal entries")
+            
 def propose_intent(coin: str, vector: List[float], event_type: str, direction: str):
     """Propose an intent (thesis-level, before execution)."""
     with _intent_pending_lock:
@@ -1619,6 +1661,7 @@ def register_shadow(coin: str, direction: str, mark: float,
         failed_risk=failed_risk.get("risk", 1.0),
         intent_drift=intent_drift,
         surprise=surprise,
+        signal_id=shadow_signal_id,
         narrative={
             "decision_type": "SHADOW_DISCOVERY",
             "gap": gap,
@@ -7876,6 +7919,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         failed_risk=failed_risk.get("risk", 1.0),
         intent_drift=intent_drift,
         surprise=surprise,
+        signal_id=signal_id,
         narrative=_narrative
     )
     log_decision_journal(journal_entry_universal)
@@ -9469,24 +9513,30 @@ def state_engine_update_v10():
             logger.warning(f"P1: Failed to register {alert['coin']}: {e}")
     
     # ===== P1 FIX: CHECK ALL OPEN POSITIONS PERIODICALLY =====
+    
+    # ===== P1 FIX: CHECK ALL OPEN POSITIONS PERIODICALLY =====
     try:
         snapshot = get_snapshot()
         closed_trades = TRADE_MANAGER.check_all_positions(snapshot)
-        
+    
         for trade in closed_trades:
             try:
-                # Update journal
+                # ===== STEP 4A: SAFE LOOKUP DENGAN getattr() =====
                 with _journal_lock:
                     for entry in _decision_journal:
-                        if entry.signal_id == trade["signal_id"]:
+                        entry_sig = getattr(entry, "signal_id", None)  # ← AMAN!
+                        if entry_sig and entry_sig == trade["signal_id"]:
                             entry.outcome = "TP_HIT" if trade["pnl"] > 0 else "SL_HIT"
                             entry.pnl = trade["pnl"]
                             entry.mfe = trade["mfe"]
                             entry.mae = trade["mae"]
+                            entry.closed = getattr(entry, "closed", True)
+                            entry.close_reason = getattr(entry, "close_reason", trade["reason"])
+                            entry.duration_minutes = getattr(entry, "duration_minutes", trade.get("duration_minutes", 0))
                             break
-                
+                 
                 logger.info(f"✅ P1: Trade closed {trade['coin']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
-                
+             
                 # Send Telegram alert
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
@@ -9500,7 +9550,7 @@ def state_engine_update_v10():
                     except:
                         pass
             except Exception as e:
-                logger.error(f"P1: Error processing closed trade {trade['signal_id']}: {e}")
+                logger.error(f"P1: Error processing closed trade {trade.get('signal_id', 'unknown')}: {e}")
     except Exception as e:
         logger.warning(f"P1: Position check error: {e}")
 
@@ -9547,7 +9597,7 @@ def state_engine_update_v11():
     candidates = build_candidate_pool(max_candidates=12)
     if not candidates:
         logger.warning("V11: No candidates from discovery, using fallback")
-        candidates = ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "MATIC", "LINK", "UNI", "AAVE"]
+        candidates = ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "POL", "LINK", "UNI", "AAVE", "ZEC", "HYPE", "TAO"]
 
     # ===== STAGE B: DEEP ANALYSIS (candles + budget) =====
     snapshot = get_snapshot()
@@ -9581,18 +9631,24 @@ def state_engine_update_v11():
             logger.warning(f"V11: Failed to register {alert['coin']}: {e}")
 
     # ===== CHECK OPEN POSITIONS (sama seperti V10) =====
+    # ===== CHECK OPEN POSITIONS (sama seperti V10) =====
     try:
         snap_for_check = get_snapshot()
         closed_trades = TRADE_MANAGER.check_all_positions(snap_for_check)
         for trade in closed_trades:
             try:
+            # ===== STEP 4B: SAFE LOOKUP DENGAN getattr() =====
                 with _journal_lock:
                     for entry in _decision_journal:
-                        if entry.signal_id == trade["signal_id"]:
+                        entry_sig = getattr(entry, "signal_id", None)  # ← AMAN!
+                        if entry_sig and entry_sig == trade["signal_id"]:
                             entry.outcome = "TP_HIT" if trade["pnl"] > 0 else "SL_HIT"
                             entry.pnl = trade["pnl"]
                             entry.mfe = trade["mfe"]
                             entry.mae = trade["mae"]
+                            entry.closed = getattr(entry, "closed", True)
+                            entry.close_reason = getattr(entry, "close_reason", trade["reason"])
+                            entry.duration_minutes = getattr(entry, "duration_minutes", trade.get("duration_minutes", 0))
                             break
                 logger.info(f"✅ V11: Trade closed {trade['coin']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
                 if USER_ID and not PAPER_MODE:
@@ -9607,11 +9663,10 @@ def state_engine_update_v11():
                     except:
                         pass
             except Exception as e:
-                logger.error(f"V11: Error processing closed trade {trade['signal_id']}: {e}")
+                logger.error(f"V11: Error processing closed trade {trade.get('signal_id', 'unknown')}: {e}")
     except Exception as e:
         logger.warning(f"V11: Position check error: {e}")
-
-
+        
 def trigger_engine_update_v7():
     refresh_snapshot()
     all_top = get_top_coins_by_volume(limit=20, min_vol=5_000_000) if 'get_top_coins_by_volume' in globals() else None
