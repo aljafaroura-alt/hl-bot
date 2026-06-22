@@ -7959,7 +7959,6 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         logger.debug(f"Accept intent error: {e}")
 
     record_opportunity_executed(coin)
-
     # ===== SAVE =====
     if not PAPER_MODE:
         save_signal_v7(signal_id, coin, event.direction, confidence_data["final_score"], mark,
@@ -7970,20 +7969,20 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                       filter_score, thesis_data["intent_confidence"], belief.value,
                       commitment_score, confidence_data["time_pressure"].value,
                       confidence_data["prediction_quality_mult"] * 100)
-        
-    # ===== KIRIM NOTIF OPEN =====
-    if USER_ID and not PAPER_MODE and decision_type == "EXECUTE":
-          try:
-              direction_emoji = "🔼" if event.direction == "LONG" else "🔽"
-              open_msg = f"🟡 *OPEN* {coin} [{direction_emoji} {event.direction}]\n"
-              open_msg += f"├─ Entry: {fmt_price(mark)}\n"
-              open_msg += f"├─ SL: {fmt_price(confidence_data['sl'])}\n"
-              open_msg += f"├─ TP: {fmt_price(confidence_data['tp'])}\n"
-              open_msg += f"├─ Score: {confidence_data['final_score']}\n"
-              open_msg += f"└─ RR: 1:{confidence_data['rr']:.1f}"
-              bot.send_message(USER_ID, open_msg, parse_mode='HTML')
-          except Exception as e:
-              logger.debug(f"Open notif error: {e}")
+
+        # ===== KIRIM NOTIF OPEN =====
+        if USER_ID and not PAPER_MODE and decision_type == "EXECUTE":
+            try:
+                direction_emoji = "🔼" if event.direction == "LONG" else "🔽"
+                open_msg = f"🟡 *OPEN* {coin} [{direction_emoji} {event.direction}]\n"
+                open_msg += f"├─ Entry: {fmt_price(mark)}\n"
+                open_msg += f"├─ SL: {fmt_price(confidence_data['sl'])}\n"
+                open_msg += f"├─ TP: {fmt_price(confidence_data['tp'])}\n"
+                open_msg += f"├─ Score: {confidence_data['final_score']}\n"
+                open_msg += f"└─ RR: 1:{confidence_data['rr']:.1f}"
+                bot.send_message(USER_ID, open_msg, parse_mode='HTML')
+            except Exception as e:
+                logger.debug(f"Open notif error: {e}")
 
         add_journal_entry_v7(coin, thesis_data["market_regime"], thesis_data["volatility_regime"],
                             thesis_data["flow_regime"], belief.value,
