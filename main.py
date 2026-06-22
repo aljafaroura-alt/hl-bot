@@ -1416,6 +1416,7 @@ def get_pipeline_metrics() -> Dict[str, Any]:
         reject_thesis = _exec_pipeline.get("reject_thesis", 0)
         reject_conf = _exec_pipeline.get("reject_conf", 0)
         reject_execute = _exec_pipeline.get("reject_execute", 0)
+        dcr = compute_dcr(obs, exec_pass)
 
         obs_rate = (obs / check * 100) if check > 0 else 0
         thesis_rate = (thesis / obs * 100) if obs > 0 else 0
