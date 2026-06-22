@@ -11972,14 +11972,14 @@ def bootstrap():
     logger.info("  └─ Step 6/6: Starting engine threads...")
     
     logger.info("✅ BOOTSTRAP COMPLETE")
-
+    
 def restore_open_trades():
     """Restore open trades from DB into TradeManager at startup"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT signal_id, coin, direction, entry_price, sl_price, timestamp
+            SELECT signal_id, coin, direction, entry_price, sl_price, tp_price, timestamp
             FROM signals WHERE evaluated=0
         """)
         rows = cursor.fetchall()
@@ -11990,12 +11990,21 @@ def restore_open_trades():
             return
         
         restored = 0
-        for signal_id, coin, direction, entry, sl, ts in rows:
+        for signal_id, coin, direction, entry, sl, tp, ts in rows:
             if signal_id not in TRADE_MANAGER.positions:
+                # Hitung ATR & regime untuk scaling targets
                 atr_pct = get_atr_pct(coin, 14, "1h") or 2.0
                 regime = get_market_regime()
                 
+                # Buat scaled targets
                 targets = calculate_scaled_targets(entry, direction, atr_pct, regime)
+                
+                # TAPI kita pake tp_price dari DB sebagai TP3 utama
+                # Biar konsisten dengan sinyal asli
+                if direction == "LONG":
+                    targets["tp3"]["price"] = max(targets["tp3"]["price"], tp)
+                else:
+                    targets["tp3"]["price"] = min(targets["tp3"]["price"], tp)
                 
                 TRADE_MANAGER.add_position(
                     signal_id=signal_id,
@@ -12008,7 +12017,15 @@ def restore_open_trades():
                 )
                 restored += 1
         
-        logger.info(f"  └─ Restored {restored} open trades")
+        logger.info(f"  └─ Restored {restored} open trades (from {len(rows)} DB records)")
+        
+        # ===== AFTER RESTORE, RUN AUDIT AGAIN =====
+        audit_result = audit_trade_state()
+        if audit_result["orphan_count"] > 0:
+            logger.warning(f"⚠️ Still {audit_result['orphan_count']} orphans after restore")
+        else:
+            logger.info("✅ All trades synced")
+        
     except Exception as e:
         logger.error(f"restore_open_trades error: {e}")
 
