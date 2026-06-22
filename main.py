@@ -7781,9 +7781,6 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     else:
         mode_override = None
         allow_entry = True
-
-
-
     # ============================================================
     # INTELLIGENT AGGRESSION: ADAPTIVE RELAXATION
     # ============================================================
@@ -7792,7 +7789,6 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     if adaptive_relax > 0:
         final_threshold = max(50, final_threshold - adaptive_relax)
         logger.debug(f"🧠 GENIUS RELAX applied: threshold {original_threshold} → {final_threshold}")
-
     # ============================================================
     # MICRO STRUCTURE CONFIRMATION (Phase 1 Precision Filter)
     # ============================================================
@@ -7974,6 +7970,20 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                       filter_score, thesis_data["intent_confidence"], belief.value,
                       commitment_score, confidence_data["time_pressure"].value,
                       confidence_data["prediction_quality_mult"] * 100)
+        
+    # ===== KIRIM NOTIF OPEN =====
+    if USER_ID and not PAPER_MODE and decision_type == "EXECUTE":
+          try:
+              direction_emoji = "🔼" if event.direction == "LONG" else "🔽"
+              open_msg = f"🟡 *OPEN* {coin} [{direction_emoji} {event.direction}]\n"
+              open_msg += f"├─ Entry: {fmt_price(mark)}\n"
+              open_msg += f"├─ SL: {fmt_price(confidence_data['sl'])}\n"
+              open_msg += f"├─ TP: {fmt_price(confidence_data['tp'])}\n"
+              open_msg += f"├─ Score: {confidence_data['final_score']}\n"
+              open_msg += f"└─ RR: 1:{confidence_data['rr']:.1f}"
+              bot.send_message(USER_ID, open_msg, parse_mode='HTML')
+          except Exception as e:
+              logger.debug(f"Open notif error: {e}")
 
         add_journal_entry_v7(coin, thesis_data["market_regime"], thesis_data["volatility_regime"],
                             thesis_data["flow_regime"], belief.value,
@@ -9428,7 +9438,7 @@ def state_engine_update_v10():
         top_coins = get_top_coins_by_volume(limit=20, min_vol=5_000_000)
     if not top_coins:
         logger.warning("Using fallback top coins list (hardcoded)")
-        top_coins = ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "MATIC", "LINK", "UNI", "AAVE"]
+        top_coins = ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "POL", "LINK", "UNI", "AAVE", "ZEC", "HYPE"]
     
     
     # ===== BATCH SCAN (PATCH 4) =====
@@ -9540,7 +9550,8 @@ def state_engine_update_v10():
                 # Send Telegram alert
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
-                    msg = f"{emoji} *CLOSE* {trade['coin']}\n"
+                    direction_emoji = "🔼" if trade["direction"] == "LONG" else "🔽"
+                    msg = f"{emoji} *CLOSE* {trade['coin']} [{direction_emoji} {trade['direction']}]\n"
                     msg += f"├─ Reason: {trade['reason']}\n"
                     msg += f"├─ PnL: {trade['pnl']:+.2f}%\n"
                     msg += f"├─ MFE: {trade['mfe']:+.2f}% | MAE: {trade['mae']:+.2f}%\n"
@@ -9653,6 +9664,7 @@ def state_engine_update_v11():
                 logger.info(f"✅ V11: Trade closed {trade['coin']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
+                    direction_emoji = "🔼" if trade["direction"] == "LONG" else "🔽"
                     msg = f"{emoji} *CLOSE* {trade['coin']}\n"
                     msg += f"├─ Reason: {trade['reason']}\n"
                     msg += f"├─ PnL: {trade['pnl']:+.2f}%\n"
