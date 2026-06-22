@@ -3079,28 +3079,27 @@ def update_price_history_1h(mids: Dict[str, float]):
             _price_history_1h[coin].append((now, price))
 
 
-def get_price_1h_ago(coin: str) -> Optional[float]:
+def get_price_1h_ago(coin: str) -> Tuple[Optional[float], float]:
     """
-    Ambil harga 1 jam lalu dari _price_history_1h.
-    Return None kalau data belum cukup (warmup).
-    
-    [PATCH P0] Fallback ke data tertua kalau belum 1 jam (warmup)
+    Return (price_1h_ago, coverage)
+    coverage = 0-1, seberapa reliable datanya
     """
     with _price_history_lock:
         if coin not in _price_history_1h:
-            return None
+            return None, 0.0
         
         history = list(_price_history_1h[coin])
         
-        # ===== FIX: Jangan reject kalau < 5 =====
-        # Gunakan data yang ada, tapi dengan confidence rendah
         if len(history) < 2:
-            return None
+            return None, 0.0
         
         now = time.time()
-        cutoff = now - 3600  # 1 jam lalu
+        oldest_age = now - history[0][0]
+        coverage = min(1.0, oldest_age / 3600)  # 0-1
         
-        # Cari data sebelum cutoff
+        cutoff = now - 3600
+        
+        # Cari data sebelum cutoff (full confidence)
         best_ts = None
         best_price = None
         for ts, price in history:
@@ -3109,42 +3108,30 @@ def get_price_1h_ago(coin: str) -> Optional[float]:
                     best_ts = ts
                     best_price = price
         
-        # ===== FIX: Fallback ke data tertua =====
+        # Fallback ke data tertua DENGAN coverage penalty
         if best_price is None and len(history) >= 2:
-            oldest_ts, oldest_price = history[0]
-            age_seconds = now - oldest_ts
-            # Minimal 30 menit data untuk fallback
-            if age_seconds >= 1800:
-                logger.debug(f"DIS_FALLBACK {coin}: using oldest data ({age_seconds/60:.0f}m ago)")
-                return oldest_price
-            # Kalau belum 30 menit, return None (warmup)
-            return None
+            return history[0][1], coverage
         
-        return best_price
+        return best_price, 1.0 if best_price else coverage
 
 
 # ============================================================
 # GATE 2: DISLOCATION SCORE (Tanpa Candles)
 # ============================================================
 
-def get_dislocation_score_v11(coin: str, snapshot) -> Tuple[float, float]:
+def get_dislocation_score_v11(coin: str, snapshot) -> Dict[str, float]:
     """
-    Dislocation = OI_growth_4h - Price_growth_1h
-    
-    Positif = OI naik tapi harga belum = menarik
-    Negatif = harga naik tapi OI ga ikut = lemah
-    
-    Return: (dislocation_score, confidence)
-    confidence 0-1: seberapa reliable datanya
+    Return {
+        "value": dislocation_value,
+        "coverage": data_reliability_0-1,
+        "confidence": confidence_0-1
+    }
     """
-    # OI growth dari _oi_history (udah ada di sistem)
-    oi_growth = get_oi_roc(coin)  # noqa: tergantung main.py
-    
-    # Price growth dari _price_history_1h (bukan candles, bukan _price_values)
+    oi_growth = get_oi_roc(coin)
     price_now = snapshot.mids.get(coin, 0) if snapshot else 0
-    price_1h_ago = get_price_1h_ago(coin)
+    price_1h_ago, coverage = get_price_1h_ago(coin)
     
-    # === INSTRUMENTATION: DIS_DEBUG ===
+    # Logging
     with _price_history_lock:
         history_len = len(_price_history_1h.get(coin, deque()))
     
@@ -3153,34 +3140,31 @@ def get_dislocation_score_v11(coin: str, snapshot) -> Tuple[float, float]:
         f"oi_growth={oi_growth:+.2f}% "
         f"price_now={price_now:.4f} "
         f"price_1h_ago={price_1h_ago if price_1h_ago else 'None'} "
-        f"history_len={history_len}"
+        f"history_len={history_len} coverage={coverage:.2f}"
     )
     
     if price_now <= 0 or price_1h_ago is None or price_1h_ago <= 0:
-        # Data belum cukup: return 0 dislocation, confidence rendah
-        confidence = min(0.3, history_len / 60)  # Confidence berdasarkan history_len
-        logger.warning(
-            f"DIS_FAIL {coin} "
-            f"price_now={price_now} price_1h_ago={price_1h_ago} "
-            f"history_len={history_len} → dislocation=0.0, confidence={confidence:.2f}"
-        )
-        return 0.0, confidence
+        return {
+            "value": 0.0,
+            "coverage": min(0.3, coverage),
+            "confidence": min(0.3, coverage)
+        }
     
     price_growth = (price_now - price_1h_ago) / price_1h_ago * 100
     dislocation = oi_growth - price_growth
-    
-    # Confidence berdasarkan umur data
-    confidence = min(1.0, history_len / 60)  # full confidence setelah 60 datapoints (~30m)
     
     logger.info(
         f"DIS_RESULT {coin} "
         f"price_growth={price_growth:+.2f}% "
         f"dislocation={dislocation:+.2f} "
-        f"history_len={history_len} confidence={confidence:.2f}"
+        f"coverage={coverage:.2f}"
     )
     
-    return dislocation, confidence
-
+    return {
+        "value": dislocation,
+        "coverage": coverage,
+        "confidence": coverage
+    }
 
 # ============================================================
 # GATE 1: OI PATTERN MULTI-TIMEFRAME
