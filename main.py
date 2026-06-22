@@ -9104,11 +9104,15 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
 
             # OI ROC dengan window 60m untuk discovery
             oi_growth = get_oi_roc(coin, window_minutes=_DISCOVERY_OI_WINDOW)
+            dislocation_data = get_dislocation_score_v11(coin, snapshot)
+            dislocation = dislocation_data["value"]
+            dis_confidence = dislocation_data["confidence"]
 
-            dislocation, dis_confidence = get_dislocation_score_v11(coin, snapshot)
-
-            # gate_score: OI movement + price/OI divergence
-            gate_score = oi_growth + max(0, dislocation * 0.5)
+            # Gate scoring: dislocation cuma dipake kalau confidence > 0.3
+           if dis_confidence > 0.3:
+                gate_score = oi_growth + max(0, dislocation * 0.5 * dis_confidence)
+           else:
+                gate_score = oi_growth  # Data belum cukup, abaikan dislocation
 
             # Sample log: 2% chance, lihat apakah growth udah non-zero
             if random.random() < 0.02:
