@@ -656,6 +656,7 @@ def get_adaptive_threshold(market_regime: str, entropy_market: int, recent_win_r
 
 # ========== LOGGING ==========
 DB_PATH = "signals.db"
+SIGNALS_DB_PATH = DB_PATH
 LOG_DIR = "logs"
 PAPER_MODE = False
 
