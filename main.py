@@ -8422,9 +8422,10 @@ def check_entry_alert_v10_phase1(coin: str, mark: float, master_candles: Dict) -
 
         if result:
             inc_pipeline_counter("execute_pass")
+            # ===== TERMINAL LOG =====
+            print(f"🚀 EXECUTED {coin} {result['direction']} score={result['score']} RR={result.get('rr', 0):.1f}")
             logger.info(f"🚀 EXECUTED {coin}: {result['direction']} score={result['score']}")
-
-            # Trace
+            #trace :
             trace = DecisionTrace(
                 timestamp=time.time(),
                 coin=coin,
