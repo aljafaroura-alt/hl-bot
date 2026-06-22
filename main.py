@@ -9521,10 +9521,7 @@ def state_engine_update_v10():
                     entry_time=time.time()
                 )
         except Exception as e:
-            logger.warning(f"P1: Failed to register {alert['coin']}: {e}")
-    
-    # ===== P1 FIX: CHECK ALL OPEN POSITIONS PERIODICALLY =====
-    
+            logger.warning(f"P1: Failed to register {alert['coin']}: {e}") 
     # ===== P1 FIX: CHECK ALL OPEN POSITIONS PERIODICALLY =====
     try:
         snapshot = get_snapshot()
@@ -9545,9 +9542,10 @@ def state_engine_update_v10():
                             entry.close_reason = getattr(entry, "close_reason", trade["reason"])
                             entry.duration_minutes = getattr(entry, "duration_minutes", trade.get("duration_minutes", 0))
                             break
-                 
+                            
+                            # ===== TERMINAL LOG =====
+                print(f"📊 CLOSE {trade['coin']} {trade['direction']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
                 logger.info(f"✅ P1: Trade closed {trade['coin']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
-             
                 # Send Telegram alert
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
@@ -9641,8 +9639,6 @@ def state_engine_update_v11():
                 )
         except Exception as e:
             logger.warning(f"V11: Failed to register {alert['coin']}: {e}")
-
-    # ===== CHECK OPEN POSITIONS (sama seperti V10) =====
     # ===== CHECK OPEN POSITIONS (sama seperti V10) =====
     try:
         snap_for_check = get_snapshot()
@@ -9662,7 +9658,10 @@ def state_engine_update_v11():
                             entry.close_reason = getattr(entry, "close_reason", trade["reason"])
                             entry.duration_minutes = getattr(entry, "duration_minutes", trade.get("duration_minutes", 0))
                             break
+                # ===== TERMINAL LOG =====
+                print(f"📊 CLOSE {trade['coin']} {trade['direction']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
                 logger.info(f"✅ V11: Trade closed {trade['coin']} | {trade['reason']} | PnL: {trade['pnl']:+.2f}%")
+                
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
                     direction_emoji = "🔼" if trade["direction"] == "LONG" else "🔽"
