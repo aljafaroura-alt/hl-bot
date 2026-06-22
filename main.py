@@ -11540,14 +11540,25 @@ def cmd_quiet(m):
     logger.info("🔇 QUIET MODE activated")
     
     bot.reply_to(m, "🔇 <b>QUIET MODE</b>\n🎚️ Log level set to INFO\n⚠️ Only final decisions + errors will appear", parse_mode='HTML')
-
+    
 @bot.message_handler(commands=['noise'])
 def cmd_noise(m):
-    """Enable DEBUG logging for 5 minutes"""
     if m.from_user.id != USER_ID:
         bot.reply_to(m, "⛔ Admin only")
         return
     
+    if not allow_noise_mode():
+        with _oi_lock:
+            hist_len = len(_oi_history.get("BTC", deque()))
+        bot.reply_to(
+            m, 
+            f"⏳ Not enough data for noise mode.\n"
+            f"   Need 60 samples, have {hist_len}\n"
+            f"   ≈ {(60 - hist_len) * 0.5:.0f} seconds remaining",
+            parse_mode='HTML'
+        )
+        return
+        
     global LOG_LEVEL
     LOG_LEVEL = "DEBUG"
     os.environ["LOG_LEVEL"] = "DEBUG"
@@ -11566,14 +11577,18 @@ def cmd_noise(m):
         logger.info("✅ DEBUG mode reset to INFO")
     
     threading.Thread(target=reset_to_quiet, daemon=True).start()
-
+    
 @bot.message_handler(commands=['trace'])
 def cmd_trace(m):
-    """Enable TRACE for raw metrics (5 minutes)"""
     if m.from_user.id != USER_ID:
         bot.reply_to(m, "⛔ Admin only")
         return
     
+    if not allow_noise_mode():
+        bot.reply_to(m, "⏳ Not enough data for trace mode (need 60 samples)")
+        return
+    
+    # ... existing trace logic
     os.environ["TRACE"] = "1"
     bot.reply_to(m, "🔍 <b>TRACE MODE</b>\n📡 Raw metrics enabled\n⏱️ Will auto-disable in 5 minutes", parse_mode='HTML')
     
