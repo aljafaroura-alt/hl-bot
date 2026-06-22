@@ -12011,11 +12011,15 @@ def bootstrap():
     ensure_signals_schema()
     detect_signal_score_column()
     
-    # ===== STEP 2: RESTORE OPEN TRADES (sebelum audit!) =====
+    # ===== STEP 2: RESTORE OPEN TRADES =====
     logger.info("  ├─ Step 2/6: Restoring open trades from DB...")
     restore_open_trades()
     
-    # ===== STEP 3: AUDIT (setelah restore, baru audit) =====
+    # ===== STEP 2.5: MIGRATE JOURNAL (TAMBAHKAN INI!) =====
+    logger.info("  ├─ Step 2.5/6: Migrating journal entries...")
+    migrate_journal_entries()  # ← TAMBAHKAN BARIS INI
+    
+    # ===== STEP 3: AUDIT =====
     logger.info("  ├─ Step 3/6: Auditing trade state post-restore...")
     audit_result = audit_trade_state()
     logger.info(f"     db_open={audit_result['db_open']}, managed={audit_result['manager_open']}, orphan={audit_result['orphan_count']}")
