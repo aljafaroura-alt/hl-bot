@@ -11951,32 +11951,125 @@ def summary_loop():
         except Exception as e:
             logger.error(f"Summary loop error: {e}")
 
+def bootstrap():
+    """Proper startup order - RUN ONCE BEFORE ENGINE"""
+    logger.info("🚀 BOOTSTRAP STARTING...")
+    
+    # ===== STEP 1: DATABASE =====
+    logger.info("  ├─ Step 1/6: Database init...")
+    init_db()
+    ensure_signals_schema()
+    detect_signal_score_column()
+    
+    # ===== STEP 2: AUDIT =====
+    logger.info("  ├─ Step 2/6: Auditing trade state...")
+    audit_result = audit_trade_state()
+    logger.info(f"     db_open={audit_result['db_open']}, orphan={audit_result['orphan_count']}")
+    
+    if audit_result["orphan_count"] > 200:
+        logger.critical(f"🔴 BOOT ABORT: {audit_result['orphan_count']} orphans detected")
+        logger.critical("   Manual cleanup required before starting")
+        sys.exit(1)
+    
+    # ===== STEP 3: RESTORE OPEN TRADES =====
+    logger.info("  ├─ Step 3/6: Restoring open trades...")
+    restore_open_trades()
+    
+    # ===== STEP 4: MARKET DATA =====
+    logger.info("  ├─ Step 4/6: Fetching market data...")
+    snapshot = refresh_snapshot()
+    if snapshot:
+        sanitize_maps_from_snapshot(snapshot)
+    
+    # ===== STEP 5: WARMUP HISTORIES =====
+    logger.info("  ├─ Step 5/6: Warming up histories...")
+    for i in range(5):
+        refresh_snapshot()
+        logger.debug(f"     Warmup {i+1}/5")
+        time.sleep(0.5)
+    
+    # ===== STEP 6: START ENGINE =====
+    logger.info("  └─ Step 6/6: Starting engine threads...")
+    
+    logger.info("✅ BOOTSTRAP COMPLETE")
+
+def restore_open_trades():
+    """Restore open trades from DB into TradeManager at startup"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT signal_id, coin, direction, entry_price, sl_price, timestamp
+            FROM signals WHERE evaluated=0
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            logger.info("  └─ No open trades to restore")
+            return
+        
+        restored = 0
+        for signal_id, coin, direction, entry, sl, ts in rows:
+            if signal_id not in TRADE_MANAGER.positions:
+                atr_pct = get_atr_pct(coin, 14, "1h") or 2.0
+                regime = get_market_regime()
+                
+                targets = calculate_scaled_targets(entry, direction, atr_pct, regime)
+                
+                TRADE_MANAGER.add_position(
+                    signal_id=signal_id,
+                    coin=coin,
+                    direction=direction,
+                    entry=entry,
+                    sl=sl,
+                    tp_targets=targets,
+                    entry_time=ts or time.time()
+                )
+                restored += 1
+        
+        logger.info(f"  └─ Restored {restored} open trades")
+    except Exception as e:
+        logger.error(f"restore_open_trades error: {e}")
 
 if __name__ == "__main__":
     args = parse_args()
     PAPER_MODE = args.paper
-    logger.info(f"Starting Smart Entry Engine V10 - Reaction Engine in {'PAPER' if PAPER_MODE else 'LIVE'} mode")
+    
+    logger.info(f"Starting Smart Entry Engine V10 - {'PAPER' if PAPER_MODE else 'LIVE'} mode")
     logger.info("🔥 P1+P2 FIX ACTIVE: Scaling Exit Engine + Adaptive Threshold")
-    init_db()
-
+    
+    # ===== BOOTSTRAP =====
+    bootstrap()  
+    
+    # ===== SIGNAL HANDLERS =====
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
+    
+    # ===== START THREADS =====
     threads = [
-    threading.Thread(target=scheduled_state_engine_v11, daemon=True),
-    threading.Thread(target=scheduled_trigger_engine_v7, daemon=True),
-    threading.Thread(target=scheduled_shadow_evaluation_v7, daemon=True),
-    threading.Thread(target=scheduled_cleanup_v7, daemon=True),
-    threading.Thread(target=monitor_pending_setups_v6, daemon=True),
-    threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
-    threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
-    threading.Thread(target=log_snapshot_metrics, daemon=True, name="metrics_logger"),
-    threading.Thread(target=summary_loop, daemon=True, name="summary"),
+        threading.Thread(target=scheduled_state_engine_v11, daemon=True),
+        threading.Thread(target=scheduled_trigger_engine_v7, daemon=True),
+        threading.Thread(target=scheduled_shadow_evaluation_v7, daemon=True),
+        threading.Thread(target=scheduled_cleanup_v7, daemon=True),
+        threading.Thread(target=monitor_pending_setups_v6, daemon=True),
+        threading.Thread(target=cleanup_memory_v10, daemon=True, name="mem_cleanup"),
+        threading.Thread(target=_db_writer_loop, daemon=True, name="db_writer"),
+        threading.Thread(target=log_snapshot_metrics, daemon=True, name="metrics_logger"),
+        threading.Thread(target=summary_loop, daemon=True, name="summary"),
     ]
     for t in threads:
         t.start()
-
+    
+    # ===== START POLLING =====
     poll_failures = 0
+    while RUNTIME.is_running():
+        try:
+            logger.info("Starting bot polling V10...")
+            bot.infinity_polling(timeout=30, long_polling_timeout=30)
+            poll_failures = 0
+
+
     while RUNTIME.is_running():
         try:
             logger.info(f"Starting bot polling V10... (failures so far: {poll_failures})")
