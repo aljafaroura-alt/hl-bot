@@ -7959,6 +7959,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         logger.debug(f"Accept intent error: {e}")
 
     record_opportunity_executed(coin)
+
     # ===== SAVE =====
     if not PAPER_MODE:
         save_signal_v7(signal_id, coin, event.direction, confidence_data["final_score"], mark,
@@ -8015,7 +8016,6 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                               event.price_low, event.price_high, event.direction)
 
     update_active_candidate_v7(coin, mark, confidence_data["entropy_market"], mark)
-
     # ===== POSITIVE FACTORS =====
     positive_factors = [event.type] + confidence_data["evidence_reasons"]
     if thesis_data["vol_spike"] >= 1.5:
@@ -9664,7 +9664,7 @@ def state_engine_update_v11():
                 if USER_ID and not PAPER_MODE:
                     emoji = "🟢" if trade["pnl"] > 0 else "🔴"
                     direction_emoji = "🔼" if trade["direction"] == "LONG" else "🔽"
-                    msg = f"{emoji} *CLOSE* {trade['coin']}\n"
+                    msg = f"{emoji} *CLOSE* {trade['coin']} [{direction_emoji} {trade['direction']}]\n"
                     msg += f"├─ Reason: {trade['reason']}\n"
                     msg += f"├─ PnL: {trade['pnl']:+.2f}%\n"
                     msg += f"├─ MFE: {trade['mfe']:+.2f}% | MAE: {trade['mae']:+.2f}%\n"
