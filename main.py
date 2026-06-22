@@ -426,10 +426,10 @@ def audit_trade_state() -> Dict[str, int]:
     [P0 LIFECYCLE FIX #1]
     """
     try:
-        # Count DB open trades
-        conn = sqlite3.connect(SIGNALS_DB_PATH)
+        # Count DB open trades - PAKE TABEL signals, BUKAN signal_outcomes
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM signal_outcomes WHERE outcome IS NULL")
+        cursor.execute("SELECT COUNT(*) FROM signals WHERE evaluated=0")
         db_open = cursor.fetchone()[0]
         conn.close()
     except Exception as e:
