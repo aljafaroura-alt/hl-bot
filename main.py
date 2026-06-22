@@ -12012,6 +12012,7 @@ def restore_open_trades():
     except Exception as e:
         logger.error(f"restore_open_trades error: {e}")
 
+
 if __name__ == "__main__":
     args = parse_args()
     PAPER_MODE = args.paper
@@ -12020,7 +12021,7 @@ if __name__ == "__main__":
     logger.info("🔥 P1+P2 FIX ACTIVE: Scaling Exit Engine + Adaptive Threshold")
     
     # ===== BOOTSTRAP =====
-    bootstrap()  
+    bootstrap()
     
     # ===== SIGNAL HANDLERS =====
     signal.signal(signal.SIGINT, signal_handler)
@@ -12041,15 +12042,8 @@ if __name__ == "__main__":
     for t in threads:
         t.start()
     
-    # ===== START POLLING =====
+    # ===== START POLLING (SATU WHILE LOOP AJA) =====
     poll_failures = 0
-    while RUNTIME.is_running():
-        try:
-            logger.info("Starting bot polling V10...")
-            bot.infinity_polling(timeout=30, long_polling_timeout=30)
-            poll_failures = 0
-
-
     while RUNTIME.is_running():
         try:
             logger.info(f"Starting bot polling V10... (failures so far: {poll_failures})")
