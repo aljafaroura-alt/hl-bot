@@ -8419,10 +8419,10 @@ def check_entry_alert_v10_phase1(coin: str, mark: float, master_candles: Dict) -
             thesis_data["event"], thesis_data["intent"], thesis_data["intent_legacy"],
             ctx, breath
         )
-
+        
         if result:
             inc_pipeline_counter("execute_pass")
-            # ===== TERMINAL LOG =====
+             # ===== TERMINAL LOG =====
             print(f"🚀 EXECUTED {coin} {result['direction']} score={result['score']} RR={result.get('rr', 0):.1f}")
             logger.info(f"🚀 EXECUTED {coin}: {result['direction']} score={result['score']}")
             #trace :
