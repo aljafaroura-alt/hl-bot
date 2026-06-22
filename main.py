@@ -9052,25 +9052,10 @@ def get_narrative_coins(snapshot: MarketSnapshot, limit: int = 3) -> List[str]:
     scored = [(c, get_oi_roc(c, window_minutes=60)) for c in coins]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c[0] for c in scored[:limit]]
-
-
+    
 def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
     """
     Discovery V11 Final: Capital Rotation Detector (Production-Ready)
-
-    FIX dari versi sebelumnya:
-    - WARMUP base = 10 + 15*coverage (proporsional, gak pernah ngalahin EARLY,
-      tapi tetap masuk pool — versi lama auto-reject pattern UNKNOWN/WARMUP,
-      bikin candidate pool kosong/sangat kecil di fase awal hidup bot)
-    - Gate pakai dislocation + OI minimum (250k), bukan percentile 35th yang
-      bisa terlalu ketat saat market sepi
-    - Narrative boost dihitung langsung dari SEMUA coin yang lolos gate,
-      bukan dari preliminary pool terpisah (lebih konsisten, satu sumber kebenaran)
-    - Akses get_snapshot/get_oi_roc/dst langsung dari scope module (bukan
-      sys.modules introspection yang rapuh dan gagal kalau di-import sebagai module)
-
-    ZERO extra API calls vs V10 — semua dari snapshot + _oi_history + _price_history
-    yang sudah di-cache.
     """
     try:
         snapshot = get_snapshot()
@@ -9080,15 +9065,13 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
         scores: Dict[str, float] = {}
         pattern_log: Dict[str, Tuple[str, float, float, float]] = {}
 
-        # ===== GATE TELEMETRY (diagnosa bottleneck) =====
+        # ===== GATE TELEMETRY =====
         _reject_oi_min = 0
         _reject_gate = 0
         _reject_late = 0
         _reject_neutral = 0
         _total_scanned = 0
 
-        # Discovery pakai window 60m — OI bergerak 1-5%/jam,
-        # window 5m selalu flat → semua coin skip gate.
         _DISCOVERY_OI_WINDOW = 60
 
         for coin in list(snapshot.mids.keys()):
@@ -9096,33 +9079,33 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
             oi_usd = snapshot.oi.get(coin, 0)
 
             # ===== GATE: OI minimum =====
-            # snapshot.oi unit = JUTA USD (oi_val * price / 1e6)
-            # 0.25 = $250k minimum, bukan 250_000 (itu = $250 TRILIUN)
             if oi_usd < 0.25:
                 _reject_oi_min += 1
                 continue
 
             # OI ROC dengan window 60m untuk discovery
             oi_growth = get_oi_roc(coin, window_minutes=_DISCOVERY_OI_WINDOW)
+
+            # ===== DISLOCATION: PAKAI DICT =====
             dislocation_data = get_dislocation_score_v11(coin, snapshot)
             dislocation = dislocation_data["value"]
             dis_confidence = dislocation_data["confidence"]
 
             # Gate scoring: dislocation cuma dipake kalau confidence > 0.3
-           if dis_confidence > 0.3:
+            if dis_confidence > 0.3:
                 gate_score = oi_growth + max(0, dislocation * 0.5 * dis_confidence)
-           else:
+            else:
                 gate_score = oi_growth  # Data belum cukup, abaikan dislocation
 
-            # Sample log: 2% chance, lihat apakah growth udah non-zero
+            # Sample log: 2% chance
             if random.random() < 0.02:
                 logger.info(
                     f"GATE {coin} oi={oi_usd/1e6:.2f}M "
                     f"growth={oi_growth:+.2f}% dis={dislocation:+.2f} "
-                    f"gate={gate_score:.2f}"
+                    f"conf={dis_confidence:.2f} gate={gate_score:.2f}"
                 )
 
-            # EPS-based warmup check (float-safe, bukan == 0.0)
+            # EPS-based warmup check
             EPS = 0.15
             is_warmup_data = (
                 abs(oi_growth) < EPS
@@ -9130,19 +9113,17 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
                 and dis_confidence < 0.5
             )
 
-            # Gate threshold: lebih longgar di startup, normal setelah 1 jam
+            # Gate threshold
             uptime_secs = time.time() - START_TIME
             if uptime_secs < 3600:
-                min_gate = 0.0   # startup: biarkan masuk, ranking yang filter
+                min_gate = 0.0
             else:
-                min_gate = 0.15  # mature: minimal ada OI movement sedikit
+                min_gate = 0.15
 
-            # Reject cuma kalau JELAS negatif (OI turun + harga ikut)
-            # bukan karena flat (bisa warmup)
+            # Reject cuma kalau JELAS negatif
             if not is_warmup_data and gate_score < min_gate:
-                # Rescue: dislocation tinggi = OI naik tapi harga belum ikut = menarik
                 if dislocation > 2.0:
-                    pass  # tetap lanjut
+                    pass
                 else:
                     _reject_gate += 1
                     logger.debug(
@@ -9152,14 +9133,13 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
                     )
                     continue
 
-            # Pattern (WARMUP = valid, tetap masuk dengan confidence rendah)
+            # Pattern
             pattern, oi_4h_growth, coverage = get_oi_pattern_v11(coin)
 
             if pattern == "LATE":
                 _reject_late += 1
                 continue
 
-            # NEUTRAL: rescue dengan dislocation (OI naik tapi harga belum ikut)
             if pattern == "NEUTRAL" and oi_growth < 1.0 and dislocation < 2.0:
                 _reject_neutral += 1
                 continue
@@ -9172,29 +9152,29 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
             elif pattern == "SPIKE":
                 base_score = 35 + min(15, max(0, oi_growth * 3))
             elif pattern == "WARMUP":
-                # Proporsional ke coverage, selalu di bawah EARLY/MOMENTUM/SPIKE
                 base_score = 10 + (15 * coverage)
-            else:  # NEUTRAL yang lolos gate (oi_growth >= 1.0)
+            else:
                 base_score = max(10, min(30, oi_growth * 5))
 
-            # Coverage adjustment (skip untuk WARMUP, sudah include coverage di base)
+            # Coverage adjustment
             if pattern != "WARMUP":
                 base_score *= (0.4 + 0.6 * coverage)
 
-            # Dislocation bonus/penalty
-            if dislocation > 1.0:
-                base_score += min(15, dislocation * 3)
-            elif dislocation < -3.0:
-                base_score -= min(10, abs(dislocation))
+            # Dislocation bonus/penalty (cuma kalau confidence cukup)
+            if dis_confidence > 0.3:
+                if dislocation > 1.0:
+                    base_score += min(15, dislocation * 3 * dis_confidence)
+                elif dislocation < -3.0:
+                    base_score -= min(10, abs(dislocation) * dis_confidence)
 
-            # Memory decay: coin yang sering kepilih dapat penalty
+            # Memory decay
             n = get_coin_selection_count(coin)
             base_score *= math.exp(-0.15 * n)
 
             scores[coin] = max(0, base_score)
             pattern_log[coin] = (pattern, oi_growth, coverage, dislocation)
 
-        # ===== GATE TELEMETRY LOG (diagnosa bottleneck sekarang kelihatan) =====
+        # ===== GATE TELEMETRY LOG =====
         _pass = len(scores)
         logger.info(
             f"GATE DEBUG total={_total_scanned} "
@@ -9207,7 +9187,7 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
             logger.warning("Discovery V11: no coins passed gates, using fallback")
             return ["BTC", "ETH", "SOL"]
 
-        # ===== NARRATIVE BOOST (langsung dari semua coin yang lolos gate) =====
+        # ===== NARRATIVE BOOST =====
         all_coins = list(scores.keys())
         for coin, base_score in list(scores.items()):
             boost = get_narrative_boost_v11_direct(coin, all_coins)
@@ -9217,12 +9197,11 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
         final_sorted = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         candidates = [c for c, _ in final_sorted[:max_candidates]]
 
-        # Alpha sentinel: BTC selalu masuk sebagai benchmark
         if "BTC" not in candidates:
             candidates.insert(0, "BTC")
             candidates = candidates[:max_candidates]
 
-        # Record selection untuk memory decay
+        # Record selection
         with _candidate_history_lock:
             for coin in candidates:
                 _candidate_history[coin] = _candidate_history.get(coin, 0) + 1
@@ -9245,12 +9224,9 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
         logger.error(f"build_candidate_pool_v11_final error: {e}")
         return ["BTC", "ETH", "SOL"]
 
-
 def build_candidate_pool(max_candidates: int = 12) -> List[str]:
     """Wrapper for Discovery V11 Final."""
     return build_candidate_pool_v11_final(max_candidates)
-
-
 
 def process_candidates_deep(candidates: List[str], snapshot: MarketSnapshot) -> Tuple[List[dict], int]:
     """Stage B: deep analysis untuk kandidat terpilih.
