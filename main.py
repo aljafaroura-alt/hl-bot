@@ -12301,6 +12301,12 @@ def cmd_quiet(m):
     
     bot.reply_to(m, "🔇 <b>QUIET MODE</b>\n🎚️ Log level set to INFO\n⚠️ Only final decisions + errors will appear", parse_mode='HTML')
 
+
+def get_entry_queue_status() -> List[Dict]:
+    """Get current entry queue status."""
+    with _entry_queue_lock:
+        return list(_entry_queue)[-20:]  # Last 20 entries
+        
 @bot.message_handler(commands=['funnel'])
 def cmd_funnel(m):
     """Show conversion funnel + threshold distribution + confidence histogram + entry queue."""
@@ -13113,10 +13119,6 @@ def queue_entry_intent(entry_data: Dict):
             
             logger.info(f"📋 ENTRY_QUEUE {entry_data.get('coin')}: score={score}, threshold={threshold}, gap={threshold-score}")
 
-def get_entry_queue_status() -> List[Dict]:
-    """Get current entry queue status."""
-    with _entry_queue_lock:
-        return list(_entry_queue)[-20:]  # Last 20 entries
 
 def _is_warmup_data_driven() -> bool:
     """Data-driven warmup with decay - can re-enter if data degrades"""
