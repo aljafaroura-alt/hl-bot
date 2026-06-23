@@ -355,23 +355,22 @@ class TradeManager:
                 new_sl = current_price * (1 + trail_pct / 100)
                 if new_sl < pos.sl:
                     pos.sl = new_sl
-                    
-    def _execute_partial(self, pos: OpenPosition, tp_level: str):
-    tp = getattr(pos, tp_level)
-    pnl_pct = ((tp.price - pos.entry) / pos.entry * 100) if pos.direction == "LONG" \
-              else ((pos.entry - tp.price) / pos.entry * 100)
-    logger.info(f"🎯 P1: PARTIAL TP {pos.coin} | {tp_level.upper()} ({tp.size_pct*100:.0f}%) | PnL: {pnl_pct:+.2f}%")
-    pos.captured_tp_levels += 1
-    
-    # ===== RECORD FUNNEL: TP HIT =====
-    if tp_level == "tp1":
-        record_funnel_stage("tp1_hit")
-    elif tp_level == "tp2":
-        record_funnel_stage("tp2_hit")
-    elif tp_level == "tp3":
-        record_funnel_stage("tp3_hit")
 
-     
+    def _execute_partial(self, pos: OpenPosition, tp_level: str):
+        tp = getattr(pos, tp_level)
+        pnl_pct = ((tp.price - pos.entry) / pos.entry * 100) if pos.direction == "LONG" \
+                  else ((pos.entry - tp.price) / pos.entry * 100)
+        logger.info(f"🎯 P1: PARTIAL TP {pos.coin} | {tp_level.upper()} ({tp.size_pct*100:.0f}%) | PnL: {pnl_pct:+.2f}%")
+        pos.captured_tp_levels += 1
+    
+        # ===== RECORD FUNNEL: TP HIT =====
+        if tp_level == "tp1":
+            record_funnel_stage("tp1_hit")
+        elif tp_level == "tp2":
+            record_funnel_stage("tp2_hit")
+        elif tp_level == "tp3":
+            record_funnel_stage("tp3_hit")
+        
     def _close_remaining(self, pos: OpenPosition, reason: str, current_price: float) -> Dict:
         if pos.direction == "LONG":
             final_pnl = (current_price - pos.entry) / pos.entry * 100
