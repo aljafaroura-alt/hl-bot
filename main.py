@@ -355,14 +355,22 @@ class TradeManager:
                 new_sl = current_price * (1 + trail_pct / 100)
                 if new_sl < pos.sl:
                     pos.sl = new_sl
-    
+                    
     def _execute_partial(self, pos: OpenPosition, tp_level: str):
-        tp = getattr(pos, tp_level)
-        pnl_pct = ((tp.price - pos.entry) / pos.entry * 100) if pos.direction == "LONG" \
-                  else ((pos.entry - tp.price) / pos.entry * 100)
-        logger.info(f"🎯 P1: PARTIAL TP {pos.coin} | {tp_level.upper()} ({tp.size_pct*100:.0f}%) | PnL: {pnl_pct:+.2f}%")
-        pos.captured_tp_levels += 1
+    tp = getattr(pos, tp_level)
+    pnl_pct = ((tp.price - pos.entry) / pos.entry * 100) if pos.direction == "LONG" \
+              else ((pos.entry - tp.price) / pos.entry * 100)
+    logger.info(f"🎯 P1: PARTIAL TP {pos.coin} | {tp_level.upper()} ({tp.size_pct*100:.0f}%) | PnL: {pnl_pct:+.2f}%")
+    pos.captured_tp_levels += 1
     
+    # ===== RECORD FUNNEL: TP HIT =====
+    if tp_level == "tp1":
+        record_funnel_stage("tp1_hit")
+    elif tp_level == "tp2":
+        record_funnel_stage("tp2_hit")
+    elif tp_level == "tp3":
+        record_funnel_stage("tp3_hit")
+        
     def _close_remaining(self, pos: OpenPosition, reason: str, current_price: float) -> Dict:
         if pos.direction == "LONG":
             final_pnl = (current_price - pos.entry) / pos.entry * 100
@@ -7198,6 +7206,8 @@ def observe_market(coin: str, mark: float, master_candles: Dict) -> Optional[Dic
         f"📊 OBS {coin} | score={best_event.score} data_conf={data_confidence} | "
         f"delta={delta:.1f} oi_roc={oi_roc:.1f} | cluster={best_event.type} strength={best_event.strength}"
     )
+    # ===== RECORD FUNNEL: OBS PASS =====
+    record_funnel_stage("obs_pass")
 
     return {
         "status": "PASS",
@@ -7210,6 +7220,7 @@ def observe_market(coin: str, mark: float, master_candles: Dict) -> Optional[Dic
         "volatility_regime": volatility_regime, "flow_regime": flow_regime,
         "oi_roc": oi_roc, "funding_pct": funding_pct, "clustered": clustered,
         "master_candles": master_candles, "context": context
+        
     }
     
 # ============================================================
@@ -7513,6 +7524,8 @@ def compute_confidence(thesis_data: Dict) -> Optional[Dict]:
         f"clarity_q={clarity_pre.get('decision_quality', 1.0):.2f} "
         f"clarity_dom={clarity_pre.get('dominant_factor', '?')}"
     )
+    # ===== RECORD FUNNEL: CONF PASS =====
+    record_funnel_stage("conf_pass")
 
     return {
         "status": "PASS",
@@ -8463,7 +8476,10 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     except Exception as e:
         logger.debug(f"Accept intent error: {e}")
 
-    record_opportunity_executed(coin)
+    record_opportunity_executed(coin)                
+    # ===== RECORD FUNNEL: EXEC PASS & OPEN =====
+    record_funnel_stage("exec_pass")
+    record_funnel_stage("open_count")
 
     # ===== SAVE =====
     if not PAPER_MODE:
