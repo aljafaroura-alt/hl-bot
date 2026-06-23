@@ -1464,6 +1464,18 @@ _threshold_stats_lock = threading.RLock()
 _conf_histogram: Dict[int, int] = {}
 _conf_histogram_window: deque = deque(maxlen=1000)
 _conf_histogram_lock = threading.RLock()
+    # ===== CONVERSION FUNNEL =====
+_conversion_funnel: Dict[str, int] = {
+    "obs_pass": 0,
+    "thesis_pass": 0,
+    "conf_pass": 0,
+    "exec_pass": 0,
+    "open_count": 0,
+    "tp1_hit": 0,
+    "tp2_hit": 0,
+    "tp3_hit": 0,
+}
+_conversion_funnel_lock = threading.RLock()
 
 # ============================================================
 # INTENT PENDING BUFFER (Proposed → Accepted)
@@ -1551,6 +1563,35 @@ def cleanup_pending_intents():
             del _intent_pending[c]
         if expired:
             logger.debug(f"Cleaned up {len(expired)} expired pending intents")
+
+def record_funnel_stage(stage: str, n: int = 1):
+    with _conversion_funnel_lock:
+        _conversion_funnel[stage] = _conversion_funnel.get(stage, 0) + n
+
+def reset_funnel():
+    with _conversion_funnel_lock:
+        for k in _conversion_funnel:
+            _conversion_funnel[k] = 0
+
+def get_funnel_summary() -> str:
+    with _conversion_funnel_lock:
+        f = _conversion_funnel
+        obs = f.get("obs_pass", 0)
+        thesis = f.get("thesis_pass", 0)
+        conf = f.get("conf_pass", 0)
+        exec_pass = f.get("exec_pass", 0)
+        
+        if obs == 0:
+            return "No funnel data"
+        
+        lines = [
+            f"OBS → THESIS: {thesis}/{obs} ({thesis/obs*100:.0f}%)" if obs > 0 else "OBS → THESIS: 0/0",
+            f"THESIS → CONF: {conf}/{thesis} ({conf/thesis*100:.0f}%)" if thesis > 0 else "THESIS → CONF: 0/0",
+            f"CONF → EXEC: {exec_pass}/{conf} ({exec_pass/conf*100:.0f}%)" if conf > 0 else "CONF → EXEC: 0/0",
+            f"EXEC → OPEN: {f.get('open_count', 0)}",
+            f"TP1: {f.get('tp1_hit', 0)} | TP2: {f.get('tp2_hit', 0)} | TP3: {f.get('tp3_hit', 0)}",
+        ]
+        return "\n".join(lines)
 
 # ============================================================
 # PIPELINE COUNTERS
@@ -8374,7 +8415,24 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         else:
             update_fatigue_memory(event.type)
             return None
-
+    # ===== QUEUE ENTRY INTENT (near-pass only) =====
+    if confidence_data.get("final_score", 0) < final_threshold:
+        if confidence_data.get("final_score", 0) >= final_threshold - 10:
+            queue_entry_intent({
+                "coin": coin,
+                "direction": event.direction,
+                "score": confidence_data.get("final_score", 0),
+                "threshold": final_threshold,
+                "gap": final_threshold - confidence_data.get("final_score", 0),
+                "entry": mark,
+                "sl": confidence_data.get("sl", 0),
+                "tp": confidence_data.get("tp", 0),
+                "rr": confidence_data.get("rr", 0),
+                "intent": intent.value if hasattr(intent, 'value') else str(intent),
+                "belief": belief.value if hasattr(belief, 'value') else str(belief),
+                "blocked": True,
+                "block_reason": "score_below_threshold",
+            })
     # If DISCOVERY mode, still log but don't execute
     if not allow_entry:
         shadow_result = {
