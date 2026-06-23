@@ -12301,12 +12301,40 @@ def cmd_quiet(m):
     
     bot.reply_to(m, "🔇 <b>QUIET MODE</b>\n🎚️ Log level set to INFO\n⚠️ Only final decisions + errors will appear", parse_mode='HTML')
 
+# ============================================================
+# ENTRY INTENT QUEUE — PINDAHKAN KE SINI (ATAS cmd_funnel)
+# ============================================================
+
+_entry_queue: deque = deque(maxlen=200)
+_entry_queue_lock = threading.RLock()
+
+def queue_entry_intent(entry_data: Dict):
+    """Queue entry intent only if near-pass (within 10 points of threshold)."""
+    with _entry_queue_lock:
+        score = entry_data.get("score", 0)
+        threshold = entry_data.get("threshold", 100)
+        
+        if score >= threshold - 10:
+            entry_data["queued_at"] = time.time()
+            entry_data["gap"] = threshold - score
+            _entry_queue.append(entry_data)
+            
+            cutoff = time.time() - 3600
+            while _entry_queue and _entry_queue[0].get("queued_at", 0) < cutoff:
+                _entry_queue.popleft()
+            
+            logger.info(f"📋 ENTRY_QUEUE {entry_data.get('coin')}: score={score}, threshold={threshold}, gap={threshold-score}")
 
 def get_entry_queue_status() -> List[Dict]:
     """Get current entry queue status."""
     with _entry_queue_lock:
-        return list(_entry_queue)[-20:]  # Last 20 entries
-        
+        return list(_entry_queue)[-20:]
+
+
+# ============================================================
+# BOT COMMAND: FUNNEL
+# ============================================================
+
 @bot.message_handler(commands=['funnel'])
 def cmd_funnel(m):
     """Show conversion funnel + threshold distribution + confidence histogram + entry queue."""
@@ -12314,20 +12342,13 @@ def cmd_funnel(m):
         bot.reply_to(m, "⛔ Admin only")
         return
     
-    # Get funnel summary
     funnel_text = get_funnel_summary()
-    
-    # Get threshold distribution
     threshold_text = get_threshold_summary()
-    
-    # Get confidence histogram
     confidence_text = get_confidence_summary()
-    
-    # Get entry queue
-    queue = get_entry_queue_status()
+    queue = get_entry_queue_status()  # ← SEKARANG AMAN!
     
     text = f"""
-📊 <b>CONVERSION FUNNEL</b>
+📡 <b>CONVERSION FUNNEL</b>
 ━━━━━━━━━━━━━━━━━━━━━━
 {funnel_text}
 
@@ -13096,29 +13117,6 @@ _shadow_stats = {
     "results": deque(maxlen=200),
 }
 _shadow_stats_lock = threading.RLock()
-
-# ===== ENTRY INTENT QUEUE =====
-_entry_queue: deque = deque(maxlen=200)
-_entry_queue_lock = threading.RLock()
-
-def queue_entry_intent(entry_data: Dict):
-    """Queue entry intent only if near-pass (within 10 points of threshold)."""
-    with _entry_queue_lock:
-        score = entry_data.get("score", 0)
-        threshold = entry_data.get("threshold", 100)
-        
-        if score >= threshold - 10:
-            entry_data["queued_at"] = time.time()
-            entry_data["gap"] = threshold - score
-            _entry_queue.append(entry_data)
-            
-            # Clean up old entries (older than 1 hour)
-            cutoff = time.time() - 3600
-            while _entry_queue and _entry_queue[0].get("queued_at", 0) < cutoff:
-                _entry_queue.popleft()
-            
-            logger.info(f"📋 ENTRY_QUEUE {entry_data.get('coin')}: score={score}, threshold={threshold}, gap={threshold-score}")
-
 
 def _is_warmup_data_driven() -> bool:
     """Data-driven warmup with decay - can re-enter if data degrades"""
