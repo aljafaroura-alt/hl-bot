@@ -7843,6 +7843,32 @@ def apply_velocity_modifier(velocity_score: int,
 # ============================================================
 # PART 34 – LAYER 4: EXECUTE DECISION (V10)
 # ============================================================
+# ============================================================
+# PATCH v10.3.3 — EXEC COUNTER (SINGLE SOURCE)
+# ============================================================
+
+_EXEC_COUNTER = {"value": 0}
+_EXEC_COUNTER_LOCK = threading.RLock()
+
+def record_execute():
+    """Single source of truth untuk execution counter."""
+    with _EXEC_COUNTER_LOCK:
+        _EXEC_COUNTER["value"] += 1
+        
+        # Sinkronisasi ke kedua sistem
+        global _opportunity_stats
+        with _opportunity_lock:
+            _opportunity_stats["executed"] = _EXEC_COUNTER["value"]
+        with _exec_pipeline_lock:
+            _exec_pipeline["execute_pass"] = _EXEC_COUNTER["value"]
+            _exec_pipeline["exec"] = _EXEC_COUNTER["value"]
+        
+        logger.info(f"📈 EXEC_COUNTER total={_EXEC_COUNTER['value']}")
+        return _EXEC_COUNTER["value"]
+
+def get_exec_count() -> int:
+    with _EXEC_COUNTER_LOCK:
+        return _EXEC_COUNTER["value"]
 
 def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                       event: TradeEvent, intent, intent_legacy,
@@ -7909,19 +7935,23 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         position_size_mult = 1.0
         logger.warning(f"⚠️ position_size_mult invalid dari confidence_data, reset 1.0 for {coin}")
 
-    # ===== EXPOSURE DIVERSIFIER (NEW) =====
-    # Instead of threshold penalty, apply size_mult penalty
+    # ===== EXPOSURE DIVERSIFIER (PATCHED v10.3.3) =====
     try:
         with TRADE_MANAGER._lock:
             positions = list(TRADE_MANAGER.positions.values())
             total_positions = len([p for p in positions if p.status == "OPEN"])
-            btc_positions = [p for p in positions if p.coin == "BTC" and p.status == "OPEN"]
-            btc_exposure = len(btc_positions) / max(1, total_positions) * 100
-            if btc_exposure > 30 and coin != "BTC":
-                old_mult = position_size_mult
-                size_mult_penalty = 0.7
-                position_size_mult *= size_mult_penalty
-                logger.info(f"EXPOSURE_DIVERSIFIER {coin}: BTC exposure {btc_exposure:.0f}% > 30% → size {old_mult:.2f}→{position_size_mult:.2f}")
+            if total_positions > 0:
+                btc_positions = [p for p in positions if p.coin == "BTC" and p.status == "OPEN"]
+                btc_exposure = len(btc_positions) / total_positions * 100
+            
+                if btc_exposure > 70 and coin != "BTC":
+                    old_mult = position_size_mult
+                    position_size_mult *= 0.6
+                    logger.info(f"EXPOSURE_DIVERSIFIER {coin}: BTC exposure {btc_exposure:.0f}% > 70% → size {old_mult:.2f}→{position_size_mult:.2f}")
+                elif btc_exposure > 50 and coin != "BTC":
+                    old_mult = position_size_mult
+                    position_size_mult *= 0.8
+                    logger.info(f"EXPOSURE_DIVERSIFIER {coin}: BTC exposure {btc_exposure:.0f}% > 50% → size {old_mult:.2f}→{position_size_mult:.2f}")
     except Exception as e:
         logger.warning(f"DIVERSIFIER_SKIP: {e}")
 
@@ -8369,6 +8399,15 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         )
         final_threshold = _hardcap
 
+    # ===== THRESHOLD_EFFECTIVE: LOG AKHIR SEBELUM GATE =====
+    logger.info(
+        f"THRESHOLD_EFFECTIVE coin={coin} "
+        f"value={final_threshold} "
+        f"regime={thesis_data.get('market_regime', 'UNKNOWN')} "
+        f"entropy={confidence_data.get('entropy_market', 50)} "
+        f"shock={context.shock_score:.0f}"
+    )
+
     # ===== THRESHOLD CHECK + SHADOW REGISTRATION + UNIVERSAL JOURNAL =====
     decision_type = "EXECUTE"
     why_not_final = why_not
@@ -8397,35 +8436,63 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     if confidence_data["final_score"] < final_threshold:
         score = confidence_data["final_score"]
         gap = final_threshold - score
-        rr = confidence_data.get("rr", 0.0)
-        
-        # === INSTRUMENTATION: EXEC_SKIP ===
+    
         logger.warning(
             f"EXEC_SKIP {coin} "
             f"score={score:.0f} < threshold={final_threshold} "
-            f"gap={gap:.0f} "
-            f"reason=score_below_threshold"
+            f"gap={gap:.0f}"
         )
-
-        # NEAR-MISS: register shadow tapi JANGAN return, lanjut ke reject
+    
+        # Shadow registration untuk near-miss
         if gap <= TUNABLE["SHADOW_MAX_GAP"]:
             try:
                 register_shadow(
                     coin, event.direction, mark, confidence_data, event,
                     intent, belief, hl, micro_acc, failed_risk,
-                    intent_drift, surprise, gap, final_threshold, rr
+                    intent_drift, surprise, gap, final_threshold,
+                    confidence_data.get("rr", 0.0)
                 )
-                shadow_registered = True
             except Exception as _se:
                 logger.debug(f"register_shadow error: {_se}")
-
-        decision_type = "REJECT"
-        why_not_final = f"score_{score}_lt_{final_threshold} (gap={gap})"
-        reason_reject = f"score {score:.0f} < {final_threshold}"
-        record_opportunity_rejected(coin, reason_reject)
+    
+        # LOG KE JOURNAL SEBELUM RETURN
+        _narrative = {
+            "decision_type": "REJECT",
+            "why_not": f"score_{score}_lt_{final_threshold}",
+            "threshold": final_threshold,
+            "score": score,
+            "gap": gap,
+        }
+        journal_entry = DecisionJournalEntry(
+            timestamp=time.time(),
+            coin=coin,
+            event_type=event.type,
+            direction=event.direction,
+            score=score,
+            mode=execution_mode_str,
+            executed=False,
+            shadow=True,
+            entry=mark,
+            sl=confidence_data["sl"],
+            tp=confidence_data["tp"],
+            rr=confidence_data.get("rr", 0.0),
+            intent=intent.value,
+            belief=belief.value,
+            decision_energy=confidence_data["decision_energy"],
+            narrative=_narrative,
+            journal_accept=True,
+            execute_accept=False,
+            blocked_reason=f"score_{score}_lt_{final_threshold}",
+        )
+        log_decision_journal(journal_entry)
+        inc_pipeline_counter("journal")
         inc_pipeline_counter("reject_execute")
-
-    # SELALU LOG KE JOURNAL (executed + rejected)
+        record_opportunity_rejected(coin, "score_below_threshold")
+        update_fatigue_memory(event.type)
+    
+        # ===== KRITIS: RETURN NONE, BUKAN LANJUT =====
+        return None
+        # SELALU LOG KE JOURNAL (executed + rejected)
     _positive_factors_early = [event.type] + confidence_data.get("evidence_reasons", [])
     _narrative = {
         "decision_type": decision_type,
@@ -9464,7 +9531,7 @@ def build_scan_universe_v2(min_vol: int = 5_000_000, base_limit: int = 20) -> Li
             raise RuntimeError("get_exchange_meta returned None (cooldown active, no stale cache)")
     except Exception as e:
         logger.error(f"build_scan_universe_v2: meta fetch failed: {e}")
-        return ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "MATIC", "LINK", "UNI", "AAVE"]
+        return ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "POL", "LINK", "UNI", "AAVE", "ZEC", "HYPE"]
 
     candidates = []
     volumes = {}
@@ -9477,7 +9544,7 @@ def build_scan_universe_v2(min_vol: int = 5_000_000, base_limit: int = 20) -> Li
 
     if not candidates:
         logger.warning("build_scan_universe_v2: no candidates above min_vol, using fallback")
-        return ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "MATIC", "LINK", "UNI", "AAVE"]
+        return ["BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "POL", "LINK", "UNI", "AAVE", "HYPE", "ZEC"]
 
     # 1. Feature extraction: OI change (raw) per coin
     oi_changes = {coin: get_oi_roc(coin, window_minutes=60) for coin in candidates}
