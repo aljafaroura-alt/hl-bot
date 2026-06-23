@@ -355,8 +355,8 @@ class TradeManager:
                 new_sl = current_price * (1 + trail_pct / 100)
                 if new_sl < pos.sl:
                     pos.sl = new_sl
-                    
-    def _execute_partial(self, pos: OpenPosition, tp_level: str):
+
+   def _execute_partial(self, pos: OpenPosition, tp_level: str):
     tp = getattr(pos, tp_level)
     pnl_pct = ((tp.price - pos.entry) / pos.entry * 100) if pos.direction == "LONG" \
               else ((pos.entry - tp.price) / pos.entry * 100)
@@ -369,7 +369,9 @@ class TradeManager:
     elif tp_level == "tp2":
         record_funnel_stage("tp2_hit")
     elif tp_level == "tp3":
-        record_funnel_stage("tp3_hit")
+        record_funnel_stage("tp3_hit") 
+                    
+
         
     def _close_remaining(self, pos: OpenPosition, reason: str, current_price: float) -> Dict:
         if pos.direction == "LONG":
