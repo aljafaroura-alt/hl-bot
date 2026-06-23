@@ -7865,7 +7865,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     with TRADE_MANAGER._lock:
         total_open = sum(1 for p in TRADE_MANAGER.positions.values() if p.status == "OPEN")
     if total_open >= MAX_TOTAL_OPEN:
-        logger.warning(f"🔴 INVENTORY LIMIT: {total_open}/{MAX_TOTAL_OPEN} open, blocking {coin}")
+        logger.warning(f"🎒 INVENTORY LIMIT: {total_open}/{MAX_TOTAL_OPEN} open, blocking {coin}")
         update_fatigue_memory(event.type)
         return None
 
@@ -8102,7 +8102,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
             coin_wins = sum(1 for e in coin_closed if e.outcome in ("TP_HIT", "PARTIAL_WIN"))
             coin_wr = coin_wins / len(coin_closed)
             if coin_wr == 0.0:
-                logger.warning(f"🔴 ZERO WR {coin}: {len(coin_closed)} trades terakhir semuanya loss, threshold dinaikkan + size diperkecil")
+                logger.warning(f"🛑 ZERO WR {coin}: {len(coin_closed)} trades terakhir semuanya loss, threshold dinaikkan + size diperkecil")
                 final_threshold = int(final_threshold * 1.3)
                 position_size_mult *= 0.3
                 exec_mode = ExecutionMode.DEFENSIVE
@@ -12826,9 +12826,90 @@ def summary_loop():
         except Exception as e:
             logger.error(f"Summary loop error: {e}")
 
+# ============================================================
+# RECONCILE — SYNC DB PENDING WITH TRADE_MANAGER
+# ============================================================
+
+def reconcile_open_positions():
+    """Sync DB pending with TradeManager positions.
+    Fix orphan ghost positions blocking inventory.
+    """
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        
+        # Get all pending signals from DB
+        cursor.execute("""
+            SELECT signal_id, coin, direction, entry_price, sl_price, timestamp
+            FROM signals WHERE evaluated = 0
+        """)
+        db_rows = cursor.fetchall()
+        conn.close()
+        
+        db_pending = len(db_rows)
+        managed_ids = set(TRADE_MANAGER.positions.keys())
+        
+        # Find orphans: in DB but NOT in TradeManager
+        orphans = []
+        for signal_id, coin, direction, entry, sl, ts in db_rows:
+            if signal_id not in managed_ids:
+                orphans.append((signal_id, coin, direction, entry, sl, ts))
+        
+        if not orphans:
+            logger.info(f"✅ RECONCILE: no orphans found (db={db_pending}, managed={len(managed_ids)})")
+            return
+        
+        logger.warning(f"🔴 RECONCILE: {len(orphans)} orphans found — archiving...")
+        
+        # Archive orphans (mark as recovered)
+        conn = db_connect()
+        cursor = conn.cursor()
+        archived = 0
+        for signal_id, coin, direction, entry, sl, ts in orphans:
+            # Check age > 1 hour → safe to archive
+            age_hours = (time.time() - ts) / 3600 if ts else 999
+            if age_hours > 1:
+                cursor.execute("""
+                    UPDATE signals 
+                    SET evaluated = 1, 
+                        outcome = 'ORPHAN_RECOVERED',
+                        exit_time = CAST(strftime('%s', 'now') AS INTEGER)
+                    WHERE signal_id = ?
+                """, (signal_id,))
+                archived += 1
+                logger.debug(f"  Archived orphan: {signal_id} {coin} (age={age_hours:.1f}h)")
+            else:
+                # Still fresh → try to restore
+                logger.debug(f"  Fresh orphan: {signal_id} {coin} (age={age_hours:.1f}h) — restoring...")
+                try:
+                    atr_pct = get_atr_pct(coin, 14, "1h") or 2.0
+                    regime = get_market_regime()
+                    targets = calculate_scaled_targets(entry, direction, atr_pct, regime)
+                    
+                    TRADE_MANAGER.add_position(
+                        signal_id=signal_id,
+                        coin=coin,
+                        direction=direction,
+                        entry=entry,
+                        sl=sl,
+                        tp_targets=targets,
+                        entry_time=ts if ts else time.time()
+                    )
+                    archived += 1  # counted as restored
+                except Exception as restore_err:
+                    logger.error(f"  Failed to restore {signal_id}: {restore_err}")
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"✅ RECONCILE DONE: archived/restored {archived} orphans")
+        
+    except Exception as e:
+        logger.error(f"reconcile_open_positions error: {e}")
+
 def bootstrap():
     """Proper startup order - RUN ONCE BEFORE ENGINE"""
-    logger.info("🚀 BOOTSTRAP STARTING...")
+    logger.info("🤖 BOOTSTRAP STARTING...🚀")
     
     # ===== STEP 1: DATABASE =====
     logger.info("  ├─ Step 1/6: Database init...")
@@ -12840,43 +12921,21 @@ def bootstrap():
     logger.info("  ├─ Step 2/6: Restoring open trades from DB...")
     restore_open_trades()
     
-    # ===== STEP 2.5: MIGRATE JOURNAL (TAMBAHKAN INI!) =====
-    logger.info("  ├─ Step 2.5/6: Migrating journal entries...")
-    migrate_journal_entries()  # ← TAMBAHKAN BARIS INI
+    # ===== STEP 2.5: RECONCILE (NEW!) =====
+    logger.info("  ├─ Step 2.5/6: Reconciling DB with TradeManager...")
+    reconcile_open_positions()
+    
+    # ===== STEP 2.6: MIGRATE JOURNAL =====
+    logger.info("  ├─ Step 2.6/6: Migrating journal entries...")
+    migrate_journal_entries()
     
     # ===== STEP 3: AUDIT =====
     logger.info("  ├─ Step 3/6: Auditing trade state post-restore...")
     audit_result = audit_trade_state()
-    logger.info(f"     db_open={audit_result['db_open']}, managed={audit_result['manager_open']}, orphan={audit_result['orphan_count']}")
     
-    # Kalau masih ada orphan setelah restore → emergency archive (bukan abort)
-    if audit_result["orphan_count"] > 0:
-        logger.warning(f"⚠️ {audit_result['orphan_count']} orphans remain after restore — archiving...")
-        try:
-            conn = db_connect()
-            cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE signals
-                SET evaluated=1,
-                    outcome='ORPHAN_RECOVERED',
-                    exit_time=CAST(strftime('%s', 'now') AS INTEGER)
-                WHERE evaluated=0
-                  AND signal_id NOT IN ({})
-            """.format(
-                ",".join(f"'{sid}'" for sid in TRADE_MANAGER.positions.keys()) or "'__none__'"
-            ))
-            conn.commit()
-            archived = cursor.rowcount
-            conn.close()
-            logger.warning(f"🔄 Archived {archived} orphan trades → continuing startup")
-        except Exception as e:
-            logger.error(f"Emergency orphan archive error: {e}")
-    
-    # Hard abort hanya kalau orphan masih ada DAN sangat ekstrem (DB corruption suspected)
-    post_orphan = audit_trade_state()["orphan_count"]
-    if post_orphan > 500:
-        logger.critical(f"🔴 BOOT ABORT: {post_orphan} orphans still present after cleanup — DB corruption suspected")
-        sys.exit(1)
+    # === NEW: RESTORE SUMMARY LOG ===
+    managed_count = len(TRADE_MANAGER.positions)
+    logger.info(f"RESTORE_SUMMARY managed={managed_count} db_pending={audit_result['db_open']} orphan={audit_result['orphan_count']}")
     
     # ===== STEP 4: MARKET DATA =====
     logger.info("  ├─ Step 4/6: Fetching market data...")
@@ -12890,6 +12949,9 @@ def bootstrap():
         refresh_snapshot()
         logger.debug(f"     Warmup {i+1}/5")
         time.sleep(0.5)
+    
+    # === POST RECON LOG ===
+    logger.info(f"POST_RECON managed={len(TRADE_MANAGER.positions)}")
     
     # ===== STEP 6: START ENGINE =====
     logger.info("  └─ Step 6/6: Starting engine threads...")
