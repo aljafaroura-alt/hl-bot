@@ -5906,6 +5906,24 @@ def auto_review():
     except Exception as e:
         logger.error(f"Auto review send error: {e}")
 
+# ============================================================
+# PATCH v10.3.3 — AUTO-HEAL ORPHANS
+# ============================================================
+
+def auto_heal_orphans():
+    """Auto-heal orphan positions every 5 minutes."""
+    while RUNTIME.is_running():
+        time.sleep(300)
+        try:
+            health = check_signal_db_health()
+            orphan_count = health.get("orphan_count", 0)
+            
+            if orphan_count > 50:
+                logger.warning(f"🔴 AUTO-HEAL: {orphan_count} orphans detected, triggering cleanup...")
+                reconcile_open_positions()
+        except Exception as e:
+            logger.error(f"auto_heal_orphans error: {e}")
+
 def snapshot_metrics() -> Dict[str, Any]:
     with _journal_lock:
         journal_size = len(_decision_journal)
@@ -8587,7 +8605,8 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
     except Exception as e:
         logger.debug(f"Accept intent error: {e}")
 
-    record_opportunity_executed(coin)                
+    # ===== RECORD EXECUTION (SINGLE SOURCE) =====
+    record_execute()         
     # ===== RECORD FUNNEL: EXEC PASS & OPEN =====
     record_funnel_stage("exec_pass")
     record_funnel_stage("open_count")
