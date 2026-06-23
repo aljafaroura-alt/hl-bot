@@ -8146,7 +8146,7 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         f"wr={wr_adj if 'wr_adj' in locals() else 0} "
         f"cal={cal_penalty if 'cal_penalty' in locals() else 0} "
         f"relax={adaptive_relax if 'adaptive_relax' in locals() else 0} "
-        f"exp={exposure_penalty if 'exposure_penalty' in locals() else 0} "
+        f"exp={exposure_diversity_penalty if 'exposure_diversity_penalty' in locals() else 1.0} "
         f"decision={decision_type if 'decision_type' in locals() else 'PENDING'}"
     )
     # ===== OPPORTUNITY TRACKING (NEW - V10) =====
@@ -10161,6 +10161,7 @@ def state_engine_update_v11():
     Stage A (cheap discovery, no candles) -> Stage B (deep analysis, API budget).
     Menggantikan scan top-N-volume statis dari V10 dengan 3-bucket candidate pool
     (alpha + OI flow + narrative) plus per-endpoint API budget supaya gak kena 429."""
+    reset_funnel()
     reset_pipeline_counter()  # FIX A1: reset tiap cycle biar Thesis gak bisa > Observed
     context = get_context_snapshot("BTC")
     snap = refresh_snapshot()
@@ -12299,7 +12300,48 @@ def cmd_quiet(m):
     logger.info("🔇 QUIET MODE activated")
     
     bot.reply_to(m, "🔇 <b>QUIET MODE</b>\n🎚️ Log level set to INFO\n⚠️ Only final decisions + errors will appear", parse_mode='HTML')
+
+@bot.message_handler(commands=['funnel'])
+def cmd_funnel(m):
+    """Show conversion funnel + threshold distribution + confidence histogram + entry queue."""
+    if m.from_user.id != USER_ID:
+        bot.reply_to(m, "⛔ Admin only")
+        return
     
+    # Get funnel summary
+    funnel_text = get_funnel_summary()
+    
+    # Get threshold distribution
+    threshold_text = get_threshold_summary()
+    
+    # Get confidence histogram
+    confidence_text = get_confidence_summary()
+    
+    # Get entry queue
+    queue = get_entry_queue_status()
+    
+    text = f"""
+📊 <b>CONVERSION FUNNEL</b>
+━━━━━━━━━━━━━━━━━━━━━━
+{funnel_text}
+
+📊 <b>THRESHOLD DISTRIBUTION</b>
+{threshold_text}
+
+📊 <b>CONFIDENCE HISTOGRAM</b>
+{confidence_text}
+
+📋 <b>ENTRY QUEUE</b> (near-pass)
+"""
+    if queue:
+        for q in queue[-8:]:
+            text += f"├─ {q['coin']} {q['direction']}: score={q['score']} threshold={q['threshold']} gap={q['gap']:.0f}\n"
+        if len(queue) > 8:
+            text += f"└─ ... and {len(queue) - 8} more\n"
+    else:
+        text += "├─ (empty)\n"
+    
+    bot.reply_to(m, text, parse_mode='HTML')
 # ============================================================
 # NOISE / TRACE GATE
 # ============================================================
