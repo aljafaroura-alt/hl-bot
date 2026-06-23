@@ -28,6 +28,7 @@ from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from queue import Queue, Empty
+from queue import Queue as _Queue
 
 import telebot
 import numpy as np
@@ -413,6 +414,47 @@ class TradeManager:
             
             return {"total": total, "open": open_count, "partial": partial_count, "closed": closed_count, "avg_pnl": avg_pnl}
 
+def record_confidence_score(score: int):
+    """Record confidence score into rolling histogram."""
+    with _conf_histogram_lock:
+        bucket = int(score // 10) * 10
+        bucket = min(100, max(0, bucket))
+        _conf_histogram[bucket] = _conf_histogram.get(bucket, 0) + 1
+        _conf_histogram_window.append(score)
+        
+        if len(_conf_histogram_window) > 1000:
+            _conf_histogram.clear()
+            for s in list(_conf_histogram_window)[-1000:]:
+                b = int(s // 10) * 10
+                b = min(100, max(0, b))
+                _conf_histogram[b] = _conf_histogram.get(b, 0) + 1
+
+def get_confidence_histogram() -> Dict[int, int]:
+    with _conf_histogram_lock:
+        return dict(_conf_histogram)
+
+def get_confidence_summary() -> str:
+    hist = get_confidence_histogram()
+    with _conf_histogram_lock:
+        scores = list(_conf_histogram_window)
+    
+    if not scores:
+        return "No confidence data"
+    
+    sorted_scores = sorted(scores)
+    median = sorted_scores[len(sorted_scores)//2]
+    p90 = sorted_scores[int(len(sorted_scores)*0.9)] if len(sorted_scores) > 10 else median
+    
+    lines = [f"Median: {median:.0f}, P90: {p90:.0f}"]
+    total = len(scores)
+    for bucket in sorted(hist.keys()):
+        count = hist[bucket]
+        pct = (count / total * 100) if total > 0 else 0
+        bar = "█" * int(pct / 4) + "░" * (25 - int(pct / 4))
+        lines.append(f"  {bucket}-{bucket+9}: {count:3d} ({pct:4.1f}%) {bar}")
+    
+    return "\n".join(lines)
+
 # Global trade manager instance
 TRADE_MANAGER = TradeManager()
 
@@ -496,6 +538,41 @@ def get_exposure_adjusted_threshold(base_threshold: int, open_positions: int = N
         adjusted = base_threshold
     
     return adjusted
+
+def record_threshold(threshold: int):
+    """Record final threshold value into distribution."""
+    with _threshold_stats_lock:
+        bucket = int(threshold // 5) * 5
+        bucket = min(100, max(50, bucket))
+        _threshold_stats[bucket] = _threshold_stats.get(bucket, 0) + 1
+
+def get_threshold_distribution() -> Dict[int, int]:
+    """Get threshold distribution snapshot."""
+    with _threshold_stats_lock:
+        return dict(_threshold_stats)
+
+def get_threshold_summary() -> str:
+    """Format threshold distribution for display."""
+    hist = get_threshold_distribution()
+    if not hist:
+        return "No threshold data"
+    
+    lines = []
+    total = sum(hist.values())
+    for bucket in sorted(hist.keys()):
+        count = hist[bucket]
+        pct = (count / total * 100) if total > 0 else 0
+        bar = "█" * int(pct / 4) + "░" * (25 - int(pct / 4))
+        lines.append(f"  {bucket}-{bucket+4}: {count:3d} ({pct:4.1f}%) {bar}")
+    
+    sorted_thresholds = []
+    for b, c in hist.items():
+        sorted_thresholds.extend([b] * c)
+    sorted_thresholds.sort()
+    median = sorted_thresholds[len(sorted_thresholds)//2] if sorted_thresholds else 0
+    p90 = sorted_thresholds[int(len(sorted_thresholds)*0.9)] if sorted_thresholds else 0
+    
+    return f"Median: {median}, P90: {p90}\n" + "\n".join(lines)
 
 
 def emergency_lifecycle_cleanup():
@@ -1332,7 +1409,7 @@ _opportunity_stats = {
 _opportunity_lock = threading.RLock()
 
 # V10: DB write queue (async DB writes)
-from queue import Queue as _Queue
+
 _db_queue: "_Queue[tuple]" = _Queue(maxsize=2000)
 MAX_DB_RETRIES = TUNABLE["MAX_DB_RETRIES"]
 
@@ -1380,6 +1457,13 @@ _intent_timeline: Dict[str, deque] = {}
 _intent_timeline_lock = threading.RLock()
 _intent_vector_history: Dict[str, deque] = {}
 _intent_vector_lock = threading.RLock()
+        # ===== THRESHOLD DISTRIBUTION =====
+_threshold_stats: Dict[int, int] = {}
+_threshold_stats_lock = threading.RLock()
+# ===== CONFIDENCE HISTOGRAM =====
+_conf_histogram: Dict[int, int] = {}
+_conf_histogram_window: deque = deque(maxlen=1000)
+_conf_histogram_lock = threading.RLock()
 
 # ============================================================
 # INTENT PENDING BUFFER (Proposed → Accepted)
@@ -7990,7 +8074,27 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
         },
         market={"breath_bull": breath_v10.get("bull", 0.5)}
     )
-    
+
+    # ===== P0.5: EXEC_GATE INSTRUMENTASI =====
+    score = confidence_data.get('final_score', 0)
+    gap = score - final_threshold
+    # ===== RECORD THRESHOLD DISTRIBUTION =====
+    record_threshold(final_threshold)
+
+    logger.info(
+        f"EXEC_GATE "
+        f"coin={coin} "
+        f"score={score:.1f} "
+        f"threshold={final_threshold:.1f} "
+        f"gap={gap:+.1f} "
+        f"base={base_threshold if 'base_threshold' in locals() else '?'} "
+        f"regime={regime_adj if 'regime_adj' in locals() else 0} "
+        f"wr={wr_adj if 'wr_adj' in locals() else 0} "
+        f"cal={cal_penalty if 'cal_penalty' in locals() else 0} "
+        f"relax={adaptive_relax if 'adaptive_relax' in locals() else 0} "
+        f"exp={exposure_penalty if 'exposure_penalty' in locals() else 0} "
+        f"decision={decision_type if 'decision_type' in locals() else 'PENDING'}"
+    )
     # ===== OPPORTUNITY TRACKING (NEW - V10) =====
     record_opportunity_scan(coin)
     if confidence_data.get("final_score", 0) > 60:
