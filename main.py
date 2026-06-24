@@ -7072,20 +7072,38 @@ def compute_exhaustion_score(coin: str, master: Dict) -> int:
         price_roc = 0
 
     exhaustion = 0
+    details = []
     if price_roc > 0.2:
         if delta_shift < 0:
             exhaustion += 30
+            details.append(f"delta_contra +30")
         if vol_spike < 0.8:
             exhaustion += 20
+            details.append(f"vol_low +20 ({vol_spike:.2f})")
         if oi_roc < -2:
             exhaustion += 20
+            details.append(f"oi_unwind +20 ({oi_roc:.1f})")
     elif price_roc < -0.2:
         if delta_shift > 0:
             exhaustion += 30
+            details.append(f"delta_contra +30")
         if vol_spike < 0.8:
             exhaustion += 20
+            details.append(f"vol_low +20 ({vol_spike:.2f})")
         if oi_roc < -2:
             exhaustion += 20
+            details.append(f"oi_unwind +20 ({oi_roc:.1f})")
+
+    # ===== P1: EXHAUSTION_DETAIL LOG =====
+    logger.info(
+        f"EXHAUSTION_DETAIL {coin}: "
+        f"price_roc={price_roc:.2f}% "
+        f"delta={delta_shift:.1f} "
+        f"vol={vol_spike:.2f} "
+        f"oi={oi_roc:.1f} "
+        f"→ {exhaustion} ({', '.join(details) if details else 'none'})"
+    )
+    # =====================================
 
     return min(100, exhaustion)
 
@@ -7309,6 +7327,13 @@ def observe_market(coin: str, mark: float, master_candles: Dict) -> Optional[Dic
     atr_pct = get_atr_pct(coin, 14, "1h", master_candles)
     vol_spike = get_volume_spike(coin, master_candles)
     delta = get_ob_delta(coin)
+    # ===== P0: UPDATE ROLLING DELTA IMMEDIATELY =====
+    # Fix: update cache di sini biar OBS dan evidence pakai delta yang sama
+    with _rolling_delta_lock:
+        if coin not in _rolling_delta:
+            _rolling_delta[coin] = deque(maxlen=TUNABLE["ROLLING_DELTA_WINDOW"])
+        _rolling_delta[coin].append(delta)
+    # =================================================
     cvd_accel = get_cvd_acceleration(coin)
     momentum = get_composite_momentum(coin, master_candles)
     structure_valid_long, structure_valid_short = get_structure_valid_separate(coin, master_candles)
@@ -10806,6 +10831,17 @@ def scheduled_state_engine_v11():
             # === P0 LIFECYCLE: AUDIT TRADE STATE ===
             audit_result = audit_trade_state()
             audit_inventory()
+            # === P2: TM_STATUS LOG ===
+            try:
+                with TRADE_MANAGER._lock:
+                    status_counts = {}
+                    for pos in TRADE_MANAGER.positions.values():
+                        status_counts[pos.status] = status_counts.get(pos.status, 0) + 1
+                    logger.info(f"TM_STATUS {status_counts}")
+                    for sid, pos in list(TRADE_MANAGER.positions.items())[:5]:
+                        logger.info(f"TM_SAMPLE {sid}: {pos.coin} {pos.status} entry={pos.entry:.4f}")
+            except Exception as tm_err:
+                logger.debug(f"TM_STATUS error: {tm_err}")
 
             # === P0 LIFECYCLE: STALE CLEANUP TIAP CYCLE (aman, sudah ada 48h age-guard internal) ===
             # Sebelumnya cuma trigger kalau orphan_count > 100, jadi reactive banget.
