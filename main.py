@@ -15865,9 +15865,9 @@ def send_close_alert_compact(trade: dict):
     
     reason_map = {
         "tp3_hit": "✅ TP3",
-        "trailing_sl": "🔴 Trail SL",
-        "timeout_tp2": "⏰ Timeout",
-        "sl_hit": "🔴 SL",
+        "trailing_sl": "⚠️ Trail SL",
+        "timeout_tp2": "⌚ Timeout",
+        "sl_hit": "🛑 SL",
         "stale_expiry": "⏰ Stale",
     }
     reason_display = reason_map.get(trade["reason"], trade["reason"])
@@ -15887,20 +15887,16 @@ TP {tp_line}
     if CHANNEL_ID:
         tg_send(CHANNEL_ID, text, parse_mode='HTML')
 
-
 def send_alert_v10(alert: dict):
     if not RUNTIME.is_alert_enabled():
         return
 
-    # alert yang punya tp_scaled artinya udah lolos execute_decision() dan
-    # POSISI SUDAH BENAR-BENAR TERBUKA di TradeManager — beda dengan alert
-    # discovery/thesis-trigger yang cuma notifikasi minat, bukan posisi real.
     is_real_position = bool(alert.get("tp_scaled"))
 
     value, label = compute_alert_value(alert)
     if value < TUNABLE["ALERT_VALUE_MIN"]:
         if is_real_position:
-            logger.warning(f"⚠️ COMPACT ALERT SKIPPED (value={value:.0f} < {TUNABLE['ALERT_VALUE_MIN']}) untuk POSISI REAL {alert['coin']} — OPEN notif utama tetap jalan terpisah di execute_decision()")
+            logger.warning(f"⚠️ COMPACT ALERT SKIPPED (value={value:.0f} < {TUNABLE['ALERT_VALUE_MIN']}) untuk POSISI REAL {alert['coin']}")
         else:
             logger.debug(f"Alert value too low ({value:.0f}), skip {alert['coin']}")
         return
@@ -15908,14 +15904,11 @@ def send_alert_v10(alert: dict):
     alert["value_label"] = label
     alert["value_score"] = value
     
-    # Compute alert level
     level = _get_alert_level(alert)
 
     coin = alert["coin"]
     now = time.time()
 
-    # FIX: Update _alert_history DULU sebelum get_progressive_cooldown dipanggil
-    # Sebelumnya: cnt selalu N-1 karena append-nya di bawah → cooldown selalu undershoot
     with _alert_history_lock:
         if coin not in _alert_history:
             _alert_history[coin] = deque(maxlen=5)
@@ -15928,7 +15921,7 @@ def send_alert_v10(alert: dict):
                 _alert_history[c] = deque(maxlen=5)
             while _alert_history[c] and now - _alert_history[c][0] > TUNABLE["ALERT_HISTORY_WINDOW"]:
                 _alert_history[c].popleft()
-            cnt = len(_alert_history[c])  # ← sekarang cnt sudah termasuk current alert
+            cnt = len(_alert_history[c])
         base_cooldown = 300 if cnt == 0 else (600 if cnt == 1 else (900 if cnt == 2 else 1200))
         mode = alert.get("execution_mode_v10", "NORMAL")
         mode_cooldown_factor = {
@@ -15942,46 +15935,25 @@ def send_alert_v10(alert: dict):
 
     cooldown = get_progressive_cooldown(coin)
     
-    # === INSTRUMENTATION: COOLDOWN_CHECK ===
     with _last_alert_lock:
-        last_alert_time = _last_alert.get(coin, None)
-        cooldown_active = coin in _last_alert and now - _last_alert[coin] < cooldown
-        logger.info(
-            f"COOLDOWN_CHECK {coin} "
-            f"last_alert_time={last_alert_time if last_alert_time else 'never'} "
-            f"now={now} "
-            f"cooldown_secs={cooldown} "
-            f"cooldown_active={cooldown_active}"
-        )
-        
-        if cooldown_active:
+        if coin in _last_alert and now - _last_alert[coin] < cooldown:
             if is_real_position:
-                logger.warning(
-                    f"⚠️ COMPACT ALERT SKIPPED (cooldown) untuk POSISI REAL {coin} "
-                    f"remaining_secs={cooldown - (now - _last_alert[coin]):.0f} — "
-                    f"OPEN notif utama tetap jalan terpisah di execute_decision()"
-                )
+                logger.warning(f"⚠️ COMPACT ALERT SKIPPED (cooldown) untuk POSISI REAL {coin}")
             else:
-                logger.warning(
-                    f"COOLDOWN_SKIP {coin} "
-                    f"remaining_secs={cooldown - (now - _last_alert[coin]):.0f}"
-                )
+                logger.warning(f"COOLDOWN_SKIP {coin} remaining_secs={cooldown - (now - _last_alert[coin]):.0f}")
             return
         _last_alert[coin] = now
 
-    # Append timestamp ke history (sudah di-pre-init di atas, tinggal append)
     with _alert_history_lock:
         _alert_history[coin].append(now)
 
-    # ===== LEVEL 0: SILENT (journal only, no send) =====
     if level == 0:
         if is_real_position:
-            logger.warning(f"⚠️ COMPACT ALERT SKIPPED (level=0/silent) untuk POSISI REAL {alert['coin']} score:{alert['score']} rr:{alert.get('rr',0):.2f} — OPEN notif utama tetap jalan terpisah di execute_decision()")
+            logger.warning(f"⚠️ COMPACT ALERT SKIPPED (level=0/silent) untuk POSISI REAL {coin}")
         else:
-            logger.debug(f"📦 Alert {alert['coin']} level 0 (silent) – score:{alert['score']} rr:{alert.get('rr',0):.2f}")
+            logger.debug(f"📦 Alert {coin} level 0 (silent)")
         return
 
-    # --- Ambil data Phase 1 ---
     regime = alert.get('regime_interpretation')
     ob_reaction = alert.get('ob_reaction')
     fvg_quality = alert.get('fvg_quality')
@@ -15989,25 +15961,19 @@ def send_alert_v10(alert: dict):
     cal_conf = alert.get('confidence_calibrated', alert.get('score', 50))
     cal_samples = alert.get('calibration_samples', 0)
 
-    # --- LEVEL 1 & 2: Build compact alert first ---
     compact = _build_compact_alert(alert)
 
-    # ===== LEVEL 1: COMPACT ONLY =====
     if level == 1:
         tg_send(USER_ID, compact)
         if CHANNEL_ID:
             tg_send(CHANNEL_ID, compact)
         return
 
-    # ===== LEVEL 2: COMPACT + FULL DETAIL =====
-    # Send compact first
     tg_send(USER_ID, compact)
     if CHANNEL_ID:
         tg_send(CHANNEL_ID, compact)
 
-    # Then send full detail
-
-    # --- Mulai build text ---
+    # ===== BUILD FULL TEXT (FIXED: NO EMOJI AT START OF STRING) =====
     arrow = "🟢" if alert["direction"] == "LONG" else "🔴"
     belief_emoji = {"seeking":"🔍","building":"🏗️","convicted":"⚡","executing":"🚀","invalidated":"❌"}.get(alert.get("belief_state", "seeking"), "❓")
     pressure_emoji = {"low":"🐢","normal":"⚖️","urgent":"⏰"}.get(alert.get("time_pressure", "normal"), "⚖️")
@@ -16027,9 +15993,10 @@ def send_alert_v10(alert: dict):
     filter_ind = "🟢" if fs >= 80 else ("🟡" if fs >= 60 else "🔴")
 
     e_data, e_market, e_decision = alert.get("entropy_data", 0), alert.get("entropy_market", 0), alert.get("entropy_decision", 0)
-    ebar_d, ebar_m, ebar_dec = ("█"*int(e_data/10)+"░"*(10-int(e_data/10))), ("█"*int(e_market/10)+"░"*(10-int(e_market/10))), ("█"*int(e_decision/10)+"░"*(10-int(e_decision/10)))
+    ebar_d = "█"*int(e_data/10)+"░"*(10-int(e_data/10)) if e_data else "░░░░░░░░░░"
+    ebar_m = "█"*int(e_market/10)+"░"*(10-int(e_market/10)) if e_market else "░░░░░░░░░░"
+    ebar_dec = "█"*int(e_decision/10)+"░"*(10-int(e_decision/10)) if e_decision else "░░░░░░░░░░"
 
-    # Convert entropy_decision to stability (100% = zero noise)
     decision_stability = 100 - e_decision
     ebar_stab = "█"*int(decision_stability/10)+"░"*(10-int(decision_stability/10))
 
@@ -16046,7 +16013,6 @@ def send_alert_v10(alert: dict):
     reaction_mode = alert.get("reaction_mode", "NORMAL")
     reaction_info = f"⚡ Reaction: {reaction_mode}" if reaction_mode != "NORMAL" else ""
 
-    # === REGIME SECTION ===
     regime_text = ""
     if regime:
         regime_text = (
@@ -16056,7 +16022,6 @@ def send_alert_v10(alert: dict):
             f"└─ Transition: {regime.transition_prob:.0f}% {regime.transition_direction}"
         )
 
-    # === OB REACTION ===
     ob_text = ""
     if ob_reaction and ob_reaction.touch_count > 0:
         ob_text = (
@@ -16067,7 +16032,6 @@ def send_alert_v10(alert: dict):
             f"└─ Confidence: {ob_reaction.confidence:.0f}%"
         )
 
-    # === FVG QUALITY ===
     fvg_text = ""
     if fvg_quality and fvg_quality.quality_score > 0:
         fvg_text = (
@@ -16078,7 +16042,6 @@ def send_alert_v10(alert: dict):
             f"└─ Quality: {fvg_quality.quality_score:.0f}"
         )
 
-    # === CONTEXT MEMORY ===
     ctx_text = ""
     if context_memory and context_memory.snapshots:
         ctx_text = (
@@ -16089,7 +16052,6 @@ def send_alert_v10(alert: dict):
             f"└─ Transitioning: {'Yes' if context_memory.is_transitioning() else 'No'}"
         )
 
-    # === WHY NOW ===
     why_now = ""
     if mode_v10 == "AGGRESSIVE":
         why_now = "⚡ <b>WHY NOW</b>: Market reaction strong + low entropy\n"
@@ -16104,12 +16066,21 @@ def send_alert_v10(alert: dict):
     elif alert.get("time_pressure") == "urgent":
         why_now = "⏰ <b>WHY NOW</b>: Time Pressure = URGENT (opportunity fading)\n"
 
-    # === BUILD FINAL TEXT ===
+    # ===== L1: ENTRY QUALITY EMOJI =====
+    eq = alert.get("entry_quality", 0)
+    if eq >= 80:
+        eq_emoji = "🚀"
+    elif eq >= 60:
+        eq_emoji = "⚡"
+    elif eq >= 40:
+        eq_emoji = "⚖️"
+    else:
+        eq_emoji = "🐢"
+
     sl_pct = abs(alert['entry'] - alert['sl']) / max(alert['entry'], 0.01) * 100
     tp_pct = abs(alert['tp'] - alert['entry']) / max(alert['entry'], 0.01) * 100
     
-    text = f"""
-{arrow} {mode_emoji} *V10 ALERT* • {coin} {intent_emoji}
+    text = f"""{arrow} {mode_emoji} *V10 ALERT* • {coin} {intent_emoji}
 ━━━━━━━━━━━━━━━━━━━━━━
 {label} | {mode_color_v10} Mode: {mode_emoji_v10} {mode_v10}
 Context age: {context_age:.1f}s {context_warn}
@@ -16118,10 +16089,9 @@ Context age: {context_age:.1f}s {context_warn}
 🧠 *Belief*: {belief_emoji} {alert.get('belief_state', 'SEEKING').upper()} | ⏱️ Pressure: {pressure_emoji} {alert.get('time_pressure', 'normal').upper()}
 📊 Intent Success: {success_emoji} {intent_success:.0f}%
 
-text += f"""
-📑 *Setup Quality*
+📊 *Setup Quality*
 ├─ Score: {alert['score']} | {alert['label']}
-├─ EQ: {alert.get('entry_quality', 0):.1f} {eq_emoji}  
+├─ EQ: {alert.get('entry_quality', 0):.1f} {eq_emoji}
 ├─ DE: {alert.get('decision_energy', 0):.1f}
 ├─ Commitment: {commit:.0f}% [{commit_bar}]
 ├─ Filter: {fs:.0f} {filter_ind}
@@ -16165,7 +16135,6 @@ text += f"""
     tg_send(USER_ID, text)
     if CHANNEL_ID:
         tg_send(CHANNEL_ID, text)
-        
 # ============================================================
 # PART 38 – BOT COMMANDS (START, CONTEXT, REACTION, INTENT, SHOCK, BREATH, EVENTS, SETEVENT)
 # ============================================================
