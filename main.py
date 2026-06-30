@@ -12422,6 +12422,42 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
               f"Mode:{execution_mode_str} | V10 Mode:{exec_mode.value.upper()} | "
               f"Filter:{filter_score:.0f} | DE:{confidence_data['decision_energy']:.1f} | Score:{confidence_data['final_score']}")
 
+    # ===== L1 ENTRY WINDOW: HITUNG ENTRY ZONE =====
+    entry_zone = None
+    try:
+        entry_zone = calculate_entry_zone(
+            coin=coin,
+            direction=event.direction,
+            base_price=mark,
+            event=event,
+            master=thesis_data.get("master_candles", {}),
+            atr_pct=thesis_data.get("atr_pct", 1.0)
+        )
+        
+        if entry_zone:
+            optimal_entry = entry_zone["optimal_entry"]
+        
+            if event.direction == "LONG":
+                sl = entry_zone["zone_low"] * 0.998
+            else:
+                sl = entry_zone["zone_high"] * 1.002
+        
+            confidence_data["entry_quality"] = entry_zone["entry_quality"]
+            confidence_data["entry_zone"] = entry_zone
+            mark = optimal_entry
+        
+            logger.info(
+                f"📐 ENTRY_ZONE {coin}: "
+                f"optimal={optimal_entry:.4f} "
+                f"zone={entry_zone['zone_low']:.4f}-{entry_zone['zone_high']:.4f} "
+                f"EQ={entry_zone['entry_quality']:.1f} "
+                f"SL_dist={entry_zone['sl_distance_pct']:.2f}%"
+            )
+    except Exception as e:
+        logger.warning(f"Entry zone calculation failed: {e}, using original entry")
+        confidence_data["entry_quality"] = 50.0
+        entry_zone = None
+                          
     signal_id = generate_signal_id(coin, event.direction)
     eval_delay = get_evaluation_delay(thesis_data["atr_pct"], confidence_data["rr"], thesis_data["market_regime"])
 
