@@ -16118,8 +16118,10 @@ Context age: {context_age:.1f}s {context_warn}
 🧠 *Belief*: {belief_emoji} {alert.get('belief_state', 'SEEKING').upper()} | ⏱️ Pressure: {pressure_emoji} {alert.get('time_pressure', 'normal').upper()}
 📊 Intent Success: {success_emoji} {intent_success:.0f}%
 
-📊 *Setup Quality*
+text += f"""
+📑 *Setup Quality*
 ├─ Score: {alert['score']} | {alert['label']}
+├─ EQ: {alert.get('entry_quality', 0):.1f} {eq_emoji}  
 ├─ DE: {alert.get('decision_energy', 0):.1f}
 ├─ Commitment: {commit:.0f}% [{commit_bar}]
 ├─ Filter: {fs:.0f} {filter_ind}
