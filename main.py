@@ -2416,6 +2416,18 @@ class FVGQuality:
                 f"age:{self.age_minutes:.0f}m, Q:{self.quality_score:.0f}")
 
 @dataclass
+class EntryZone:
+    """L1 Entry Window: Entry zone dengan quality scoring."""
+    zone_low: float
+    zone_high: float
+    optimal_entry: float
+    entry_quality: float  # 0-100
+    sl_distance_pct: float
+    confidence: float
+    components: Dict[str, float] = field(default_factory=dict)
+    impulse_distance_minutes: float = 0.0
+
+@dataclass
 class ContextMemory:
     snapshots: List[ContextSnapshot] = field(default_factory=list)
     max_size: int = 5
