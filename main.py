@@ -6971,6 +6971,183 @@ def get_funding_pct(coin: str) -> float:
     if snapshot and coin in snapshot.funding:
         return snapshot.funding[coin]
     return 0.0
+
+# ============================================================
+# L1 ENTRY WINDOW — ENTRY ZONE CALCULATOR
+# ============================================================
+
+def get_vwap_in_zone(coin: str, low: float, high: float, master: Dict) -> float:
+    """Calculate VWAP within price zone from recent candles."""
+    candles = get_candles(coin, "5m", 20, master)
+    if not candles:
+        return (low + high) / 2
+    
+    total_volume = 0.0
+    total_value = 0.0
+    
+    for c in candles[-10:]:
+        price = float(c['c'])
+        volume = float(c['v'])
+        if low <= price <= high:
+            total_volume += volume
+            total_value += volume * price
+    
+    if total_volume > 0:
+        return total_value / total_volume
+    return (low + high) / 2
+
+
+def get_spread_compression(coin: str, master: Dict) -> float:
+    """
+    Spread compression = current range / ATR.
+    Lower = more compressed = better for entry.
+    """
+    candles = get_candles(coin, "5m", 10, master)
+    if not candles or len(candles) < 3:
+        return 0.5
+    
+    recent_ranges = [float(c['h']) - float(c['l']) for c in candles[-3:]]
+    avg_range = sum(recent_ranges) / len(recent_ranges)
+    avg_price = float(candles[-1]['c'])
+    range_pct = avg_range / avg_price * 100
+    
+    atr = get_atr_pct(coin, 14, "1h", master)
+    if atr <= 0:
+        atr = 1.0
+    
+    compression = min(1.0, range_pct / atr)
+    return 1.0 - compression
+
+
+def get_velocity_alignment(coin: str, direction: str, master: Dict) -> float:
+    """
+    Check if price and delta are moving in same direction.
+    """
+    delta_shift = get_delta_shift(coin)
+    
+    candles = get_candles(coin, "5m", 6, master)
+    if not candles or len(candles) < 2:
+        price_change = 0
+    else:
+        price_now = float(candles[-1]['c'])
+        price_5m_ago = float(candles[0]['c'])
+        price_change = (price_now - price_5m_ago) / max(price_5m_ago, 0.01) * 100 if price_5m_ago else 0
+    
+    if direction == "LONG":
+        if delta_shift > 0 and price_change > 0:
+            return 1.0
+        elif delta_shift > 0 or price_change > 0:
+            return 0.6
+        else:
+            return 0.2
+    else:
+        if delta_shift < 0 and price_change < 0:
+            return 1.0
+        elif delta_shift < 0 or price_change < 0:
+            return 0.6
+        else:
+            return 0.2
+
+
+def get_delta_persistence_score(coin: str, direction: str, window: int = 3) -> float:
+    """
+    Check if delta maintained direction over last N candles.
+    Returns 0-1 score.
+    """
+    with _rolling_delta_lock:
+        if coin not in _rolling_delta or len(_rolling_delta[coin]) < window:
+            return 0.3
+        recent = list(_rolling_delta[coin])[-window:]
+    
+    if direction == "LONG":
+        if all(d > -0.5 for d in recent) and recent[-1] > recent[0]:
+            return 1.0
+        elif all(d > -0.5 for d in recent):
+            return 0.7
+        elif recent[-1] > recent[0]:
+            return 0.5
+        else:
+            return 0.3
+    else:
+        if all(d < 0.5 for d in recent) and recent[-1] < recent[0]:
+            return 1.0
+        elif all(d < 0.5 for d in recent):
+            return 0.7
+        elif recent[-1] < recent[0]:
+            return 0.5
+        else:
+            return 0.3
+
+
+def calculate_entry_zone(
+    coin: str,
+    direction: str,
+    base_price: float,
+    event: TradeEvent,
+    master: Dict,
+    atr_pct: float
+) -> Dict:
+    """
+    L1 ENTRY WINDOW CORE: Buat entry zone, BUKAN limit price fixed.
+    
+    Components:
+    1. Flow stability (delta persistence)
+    2. Spread quality (compression vs ATR)
+    3. Velocity alignment (price & delta searah)
+    4. Distance from impulse
+    """
+    # ===== 1. FIND SUPPORT/RESISTANCE =====
+    candles_1h = get_candles(coin, "1h", 60, master)
+    highs, lows = detect_swing_points(candles_1h, lookback=3) if candles_1h else ([], [])
+    
+    if direction == "LONG":
+        supports = [l[1] for l in lows if l[1] < base_price]
+        nearest_support = max(supports) if supports else base_price * (1 - atr_pct / 100 * 0.5)
+        zone_low = nearest_support
+        zone_high = base_price * 1.005
+    else:
+        resistances = [h[1] for h in highs if h[1] > base_price]
+        nearest_resistance = min(resistances) if resistances else base_price * (1 + atr_pct / 100 * 0.5)
+        zone_low = base_price * 0.995
+        zone_high = nearest_resistance
+    
+    # ===== 2. FIND OPTIMAL ENTRY =====
+    vwap = get_vwap_in_zone(coin, zone_low, zone_high, master)
+    optimal_price = vwap
+    optimal_price = max(zone_low, min(zone_high, optimal_price))
+    
+    # ===== 3. COMPUTE ENTRY QUALITY =====
+    flow_stability = get_delta_persistence_score(coin, direction, window=3)
+    spread_quality = get_spread_compression(coin, master)
+    velocity_alignment = get_velocity_alignment(coin, direction, master)
+    impulse_distance = get_distance_from_impulse(coin, master)
+    
+    entry_quality = (
+        flow_stability * 0.30 +
+        spread_quality * 0.25 +
+        velocity_alignment * 0.25 +
+        impulse_distance * 0.20
+    ) * 100
+    
+    # ===== 4. SL DISTANCE =====
+    sl_distance = abs(optimal_price - zone_low) / max(optimal_price, 0.01) * 100
+    sl_distance = max(0.1, min(5.0, sl_distance))
+    
+    return {
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+        "optimal_entry": optimal_price,
+        "entry_quality": round(entry_quality, 2),
+        "sl_distance_pct": round(sl_distance, 2),
+        "confidence": min(1.0, entry_quality / 80),
+        "components": {
+            "flow_stability": round(flow_stability, 2),
+            "spread_quality": round(spread_quality, 2),
+            "velocity_alignment": round(velocity_alignment, 2),
+            "impulse_distance": round(impulse_distance, 2),
+        },
+        "impulse_age_minutes": get_impulse_age_minutes(coin, master)
+    }
     
 # ========== REGIMES ==========
 
