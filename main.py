@@ -4258,7 +4258,8 @@ def save_signal_v7(signal_id, coin, direction, score, entry, sl, tp, rr, reason,
                    conviction_penalty: float = None,            # P4.50
                    mem_outcome_boost_at_entry: float = None,    # P4.50
                    mem_cooldown_mult_at_entry: float = None,    # P4.50
-                   mem_stability_at_entry: float = None):       # P4.50
+                   mem_stability_at_entry: float = None,     # P4.50
+                   entry_quality: float = None):
     conn = None
     try:
         conn = db_connect()
@@ -4266,10 +4267,8 @@ def save_signal_v7(signal_id, coin, direction, score, entry, sl, tp, rr, reason,
         # Check which columns exist (P4.3/P4.50 columns may not be migrated yet)
         c.execute("PRAGMA table_info(signals)")
         existing_cols = [row[1] for row in c.fetchall()]
+        # Di dalam try block, setelah c.execute("PRAGMA table_info(signals)")
         if "conviction_mode" in existing_cols:
-            # P4.50: full insert including conviction + MEM-at-entry snapshot.
-            # `conviction` column already existed (P4.25-30) but was never
-            # written by this function before — first real write happens here.
             c.execute('''INSERT INTO signals
                          (signal_id, coin, direction, score, entry_price, sl_price, tp_price, rr, reason,
                           timestamp, data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
@@ -4277,15 +4276,17 @@ def save_signal_v7(signal_id, coin, direction, score, entry, sl, tp, rr, reason,
                           intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality,
                           evidence_families, raw_score, score_adjustment, calibrated_score, calibration_bucket,
                           conviction, conviction_mode, conviction_penalty,
-                          mem_outcome_boost_at_entry, mem_cooldown_mult_at_entry, mem_stability_at_entry)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                          mem_outcome_boost_at_entry, mem_cooldown_mult_at_entry, mem_stability_at_entry,
+                          entry_quality)  -- ← TAMBAHKAN
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                       (signal_id, coin, direction, score, entry, sl, tp, rr, reason, int(time.time()),
                        data_confidence, hypothesis_thesis, hypothesis_invalidate, hypothesis_observe,
                        execution_mode, intent_type, decision_energy, position_size_mult, filter_score,
                        intent_confidence, belief_state, commitment_score, time_pressure, prediction_quality,
                        evidence_families, raw_score, score_adjustment, calibrated_score, calibration_bucket,
                        conviction, conviction_mode, conviction_penalty,
-                       mem_outcome_boost_at_entry, mem_cooldown_mult_at_entry, mem_stability_at_entry))
+                       mem_outcome_boost_at_entry, mem_cooldown_mult_at_entry, mem_stability_at_entry,
+                       entry_quality))
         elif "raw_score" in existing_cols:
             c.execute('''INSERT INTO signals
                          (signal_id, coin, direction, score, entry_price, sl_price, tp_price, rr, reason,
