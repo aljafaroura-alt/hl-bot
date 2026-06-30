@@ -3900,7 +3900,25 @@ def migrate_p450_conviction_mem_columns():
     finally:
         if conn:
             conn.close()
-
+            
+def migrate_entry_quality_column():
+    """L1 Entry Window: Add entry_quality column to signals table."""
+    conn = None
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(signals)")
+        existing_cols = [row[1] for row in c.fetchall()]
+        
+        if "entry_quality" not in existing_cols:
+            c.execute("ALTER TABLE signals ADD COLUMN entry_quality REAL DEFAULT NULL")
+            logger.info("✅ Added entry_quality column to signals table")
+            conn.commit()
+    except Exception as e:
+        logger.error(f"migrate_entry_quality_column error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 # ============================================================
 # P4.3 — THESIS CALIBRATION ENGINE
