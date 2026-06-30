@@ -15700,6 +15700,7 @@ def _build_compact_alert(alert: dict) -> str:
     compact = (
         f"{direction_emoji} <b>{alert['coin']} {alert['direction']}</b>\n"
         f"├─ Score: {score} {label} | RR: 1:{rr:.1f}\n"
+        f"├─ EQ: {eq:.0f} {eq_emoji} | Size: {size:.1f}x\n"  # ← TAMBAHKAN
         f"├─ Flow: {flow_status} | Price: {price_status} | Pos: {pos_status}\n"
         f"├─ Entry {entry} | SL {sl} | TP {tp}\n"
         f"├─ Why: +{reasons} | –{neg}\n"
@@ -15707,7 +15708,7 @@ def _build_compact_alert(alert: dict) -> str:
         f"{conv_line}"
         f"{mem_line}"
         f"{learn_line}"
-        f"└─ Size: {size:.1f}x | /entry {alert['coin']}"
+        f"└─ /entry {alert['coin']}"
     )
     return compact
 
