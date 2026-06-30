@@ -15017,6 +15017,7 @@ def state_engine_update_v10():
                             entry_atr_pct=alert.get("atr_pct", 0.0),
                             # ===== HIGH-LEV: pass leverage ke posisi (fix: V10 path was missing this) =====
                             leverage=alert.get("leverage_suggested", 1.0),
+                            entry_quality=alert.get("entry_quality", 0.0),  # ← TAMBAHKAN  
                         )
                         _register_ok = True
                         logger.info(f"POSITION_REGISTERED signal={_sig_id} coin={alert['coin']} managed={len(TRADE_MANAGER.positions)}")
@@ -15218,6 +15219,7 @@ def state_engine_update_v11():
                         entry_atr_pct=alert.get("atr_pct", 0.0),
                         # ===== HIGH-LEV: pass suggested leverage ke posisi =====
                         leverage=alert.get("leverage_suggested", 1.0),
+                        entry_quality=alert.get("entry_quality", 0.0), 
                     )
                     _register_ok = True
                     logger.info(f"✅ V11 TradeManager registered: {alert['coin']} {_sig_id}")
@@ -15246,7 +15248,7 @@ def state_engine_update_v11():
                 # ===== TERMINAL LOG =====
                 _t_lev = trade.get("leverage", 1.0) or 1.0
                 _t_lpnl = trade.get("leveraged_pnl", trade["pnl"] * _t_lev)
-                print(f"📊 CLOSE {trade['coin']} {trade['direction']} | {trade['reason']} | PnL: {_t_lpnl:+.2f}% (x{_t_lev:.1f}) | raw: {trade['pnl']:+.2f}%")
+                print(f"🍗 CLOSE {trade['coin']} {trade['direction']} | {trade['reason']} | PnL: {_t_lpnl:+.2f}% (x{_t_lev:.1f}) | raw: {trade['pnl']:+.2f}%")
                 logger.info(f"✅ V11: Trade closed {trade['coin']} | {trade['reason']} | PnL: {_t_lpnl:+.2f}% (x{_t_lev:.1f}) raw={trade['pnl']:+.2f}%")
                 
                 if USER_ID and not PAPER_MODE:
