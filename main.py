@@ -929,7 +929,8 @@ class TradeManager:
                      conviction_penalty: float = 0.0, mem_outcome_boost: float = 0.0,
                      mem_cooldown_mult: float = 1.0, mem_stability: Optional[float] = None,
                      mem_edge: float = 0.0, entry_atr_pct: float = 0.0,
-                     leverage: float = 1.0):
+                     leverage: float = 1.0,
+                     entry_quality: float = 0.0):
         """Register posisi baru dengan scaled targets"""
         with self._lock:
             pos = OpenPosition(
@@ -941,6 +942,7 @@ class TradeManager:
                 entry_time=entry_time,
                 highest=entry,
                 lowest=entry,
+                entry_quality=entry_quality,
                 tp1=PartialTPLevel(
                     price=tp_targets["tp1"]["price"],
                     size_pct=tp_targets["tp1"]["size_pct"],
