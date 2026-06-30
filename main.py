@@ -1298,6 +1298,10 @@ class TradeManager:
             f"mature={feedback['mature']}"
         )
         # ===== END P4.50 =====
+    
+        # ===== L1: ENTRY QUALITY IN CLOSE =====
+        eq = getattr(pos, "entry_quality", 0.0)
+    
 
         return {
             "signal_id": pos.signal_id,
@@ -1332,6 +1336,7 @@ class TradeManager:
             "mem_outcome_boost_at_entry": pos.mem_outcome_boost,
             "mem_cooldown_mult_at_entry": pos.mem_cooldown_mult,
             "mem_stability_at_entry": pos.mem_stability,
+            "entry_quality": eq,  
         }
     
     def get_open_count(self) -> int:
