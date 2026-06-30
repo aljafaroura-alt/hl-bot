@@ -493,6 +493,7 @@ class OpenPosition:
     entry: float
     sl: float
     entry_time: float
+    entry_quality: float = 0.0
     
     # Multi-tier TP targets
     tp1: PartialTPLevel
@@ -19143,6 +19144,7 @@ def bootstrap():
     migrate_score_calibration_columns()
     migrate_quality_conviction_columns()
     migrate_p450_conviction_mem_columns()
+    migrate_entry_quality_column()
     detect_signal_score_column()
     
     # ===== STEP 2: RESTORE OPEN TRADES =====
