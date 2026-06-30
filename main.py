@@ -6880,6 +6880,79 @@ def get_atr_pct(coin: str, period: int = 14, timeframe: str = "1h", master: Dict
     price = float(candles[-1]['c'])
     return (atr / price) * 100 if price > 0 else 1.0
 
+# ============================================================
+# L1 ENTRY WINDOW — IMPULSE DETECTION
+# ============================================================
+
+def detect_impulse_candle(coin: str, master: Dict = None) -> Optional[Dict]:
+    """
+    Deteksi impulse candle terakhir.
+    Impulse = candle dengan range > 1.5x ATR atau volume > 2x average.
+    
+    Return: {"time": timestamp, "range_pct": float, "volume_ratio": float, "idx": int}
+    """
+    candles = get_candles(coin, "5m", 30, master)
+    if not candles or len(candles) < 10:
+        return None
+    
+    atr = get_atr_pct(coin, 14, "1h", master)
+    if atr <= 0:
+        atr = 0.5
+    
+    vols = [float(c['v']) * float(c['c']) for c in candles[-10:]]
+    avg_vol = sum(vols) / len(vols) if vols else 1
+    
+    for i in range(len(candles) - 1, max(0, len(candles) - 15), -1):
+        c = candles[i]
+        candle_range = (float(c['h']) - float(c['l'])) / float(c['c']) * 100
+        candle_vol = float(c['v']) * float(c['c'])
+        
+        if candle_range > atr * 1.5 or candle_vol > avg_vol * 2.0:
+            return {
+                "time": c.get('t', 0) / 1000,
+                "range_pct": candle_range,
+                "volume_ratio": candle_vol / avg_vol if avg_vol > 0 else 1.0,
+                "idx": i,
+                "high": float(c['h']),
+                "low": float(c['l']),
+                "close": float(c['c'])
+            }
+    
+    return None
+
+
+def get_distance_from_impulse(coin: str, master: Dict = None) -> float:
+    """
+    Hitung jarak dari impulse candle terakhir.
+    Return: 0-1 score (1 = perfect distance, 0 = terlalu dekat/terlalu jauh)
+    """
+    impulse = detect_impulse_candle(coin, master)
+    if not impulse:
+        return 0.5
+    
+    minutes_since = (time.time() - impulse["time"]) / 60
+    
+    if 5 <= minutes_since <= 15:
+        return 1.0
+    elif 3 <= minutes_since < 5:
+        return 0.8
+    elif 15 < minutes_since <= 25:
+        return 0.7
+    elif 1 <= minutes_since < 3:
+        return 0.5
+    elif minutes_since < 1:
+        return 0.3
+    else:
+        return max(0.0, 1.0 - (minutes_since - 25) / 60)
+
+
+def get_impulse_age_minutes(coin: str, master: Dict) -> float:
+    """Get age of last impulse in minutes."""
+    impulse = detect_impulse_candle(coin, master)
+    if not impulse:
+        return 999
+    return (time.time() - impulse["time"]) / 60
+
 def get_session() -> str:
     h = get_wib_hour()
     if 8 <= h < 15: return "ASIA"
