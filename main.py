@@ -13009,8 +13009,8 @@ def execute_decision(coin: str, thesis_data: Dict, confidence_data: Dict,
                       conviction_penalty=conviction_data.get("total_penalty"),
                       mem_outcome_boost_at_entry=get_recent_outcome_boost(coin),
                       mem_cooldown_mult_at_entry=get_coin_cooldown_penalty(coin),
-                      mem_stability_at_entry=compute_mem_stability(coin))
-
+                      mem_stability_at_entry=compute_mem_stability(coin),
+                      entry_quality=confidence_data.get("entry_quality", 0.0))
         # ===== TANDAI COOLDOWN HANYA JIKA DB WRITE SUKSES =====
         mark_entry_cooldown(coin, event.direction)
 
