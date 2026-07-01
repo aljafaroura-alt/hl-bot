@@ -15429,6 +15429,27 @@ def build_scan_universe_v2(min_vol: int = 5_000_000, base_limit: int = 20) -> Li
 
 _api_window: List[Tuple[str, float]] = []
 _api_window_lock = threading.RLock()
+
+# ============================================================
+# P0: MARKET HALF-LIFE STATE
+# ============================================================
+
+_entropy_ema: Dict[str, float] = {}
+_entropy_ema_lock = threading.RLock()
+_ENTROPY_EMA_ALPHA = 0.2  # Smoothing factor
+
+_refresh_in_progress: Dict[str, float] = {}
+_refresh_in_progress_lock = threading.RLock()
+_REFRESH_MIN_GAP = 15
+
+_obs_counter: Dict[str, int] = {}
+_obs_counter_lock = threading.RLock()
+
+# ===== CHAOS FETCH TRACKING =====
+_chaos_fetch_count = 0
+_chaos_fetch_lock = threading.RLock()
+_CHAOS_FETCH_LIMIT = 3
+
 API_BUDGET_PER_CYCLE = 20
 API_COOLDOWN = {"candles": 2.0, "snapshot": 1.0, "l2": 1.0, "trades": 1.0, "meta": 5.0}
 
