@@ -16901,30 +16901,11 @@ def process_candidates_deep(candidates: List[str], snapshot: MarketSnapshot) -> 
 ║ market_chaos={market_chaos} btc_entropy={btc_entropy:.2f}
 ╚════════════════════════════════════════════╝
 """)
-
+    
     for i, coin in enumerate(candidates):
         logger.info(f"┌─ STEP_{i}: coin={coin}")
-        
-        # ===== P0: CHAOS MODE — PRIORITY-BASED FETCH =====
-        should_force_live = False
-        if market_chaos:
-            with _chaos_fetch_lock:
-                if _chaos_fetch_count < _CHAOS_FETCH_LIMIT:
-                    coin_priority = priorities.get(coin, 0.3)
-                    if coin_priority > 0.4:  # Threshold untuk fetch
-                        should_force_live = True
-                        _chaos_fetch_count += 1
-                        logger.info(f"⚡ CHAOS FETCH #{_chaos_fetch_count}: {coin} (priority={coin_priority:.2f})")
-                else:
-                    logger.debug(f"⏳ CHAOS FETCH LIMIT ({_CHAOS_FETCH_LIMIT}) reached for {coin}")
-
-        # ... (lanjut ke kode existing di bawah)
 
         # ===== P5: STALE SNAPSHOT REFRESH =====
-        # Loop ini bisa kena time.sleep() dari budget/cooldown wait di bawah,
-        # jadi snapshot yang diambil sekali di awal bisa stale untuk coin
-        # yang discan belakangan. Refresh tiap 30s, fallback ke snapshot lama
-        # kalau refresh gagal (jangan skip coin gara-gara refresh doang).
         if time.time() - last_snapshot_refresh > SNAPSHOT_REFRESH_INTERVAL:
             fresh_snapshot = refresh_snapshot()
             last_snapshot_refresh = time.time()
@@ -16933,7 +16914,6 @@ def process_candidates_deep(candidates: List[str], snapshot: MarketSnapshot) -> 
                 logger.debug(f"   🔄 snapshot refreshed (age>{SNAPSHOT_REFRESH_INTERVAL}s)")
             else:
                 logger.warning(f"   ⚠️ snapshot refresh failed, continuing with stale snapshot")
-        # =======================================
 
         # Check 1: API Budget
         budget_val = get_api_used()
@@ -16955,57 +16935,43 @@ def process_candidates_deep(candidates: List[str], snapshot: MarketSnapshot) -> 
             skip_reasons["mark_zero"] = skip_reasons.get("mark_zero", 0) + 1
             continue
 
-        # Check 3: Global API cooldown + PER-ENDPOINT health (P4.53 + P0)
-        # Cooldown cuma boleh matiin LIVE fetch, BUKAN observability.
-        # get_candles() sendiri sudah punya internal guard (can_call_api()
-        # + can_call_endpoint("candles")) jadi force_live di sini cuma soal
-        # "boleh nyoba live atau cache-only" — kalau live gagal karena
-        # cooldown/429, get_candles akan return [] dan kita fallback ke cache.
-        #
-        # FIX: sebelumnya force_live cuma ngecek can_call_api() (global),
-        # gak ngecek can_call_endpoint("candles") (per-endpoint). Efeknya:
-        # global API sehat tapi endpoint candles lagi cooldown (fail#1, 2s)
-        # -> force_live=True -> coba live fetch -> gagal -> tapi gate skip
-        # di bawah udah kelewat karena "not force_live" salah dievaluasi.
-# Check 3: Global API cooldown + PER-ENDPOINT health
-api_ok = can_call_api()
-endpoint_ok = can_call_endpoint("candles")
-cooldown_rem = 0.0 if api_ok else api_cooldown_remaining()
-force_live = api_ok and endpoint_ok
-if not endpoint_ok:
-    logger.debug(f"   ENDPOINT_COOLDOWN: candles blocked → CACHE_ONLY for {coin}")
-    inc_pipeline_counter("api_skip")
-elif cooldown_rem > 0:
-    logger.debug(f"   SOFT_COOLDOWN: {cooldown_rem:.1f}s remaining → CACHE_ONLY for {coin}")
-    inc_pipeline_counter("api_skip")
+        # Check 3: Global API cooldown + PER-ENDPOINT health
+        api_ok = can_call_api()
+        endpoint_ok = can_call_endpoint("candles")
+        cooldown_rem = 0.0 if api_ok else api_cooldown_remaining()
+        force_live = api_ok and endpoint_ok
+        if not endpoint_ok:
+            logger.debug(f"   ENDPOINT_COOLDOWN: candles blocked → CACHE_ONLY for {coin}")
+            inc_pipeline_counter("api_skip")
+        elif cooldown_rem > 0:
+            logger.debug(f"   SOFT_COOLDOWN: {cooldown_rem:.1f}s remaining → CACHE_ONLY for {coin}")
+            inc_pipeline_counter("api_skip")
 
-# Check 5: Get candles dengan cache-aware
-cache_age = get_cache_age(coin, "1h", 100)
-never_cached = cache_age >= 999.0
-rank = i + 1
+        # Check 5: Get candles dengan cache-aware
+        cache_age = get_cache_age(coin, "1h", 100)
+        never_cached = cache_age >= 999.0
+        rank = i + 1
 
-# ===== P0: DUA JALUR EKSEKUSI =====
-# Jalur 1: Tenang (cache-first) + jalur 2: Chaos (fetch-first dengan priority)
-want_live = force_live and (never_cached or should_refresh_live("THESIS", cache_age, rank))
-want_live = want_live or should_force_live  # Chaos mode override dari STEP 5
+        # ===== P0: DUA JALUR EKSEKUSI =====
+        want_live = force_live and (never_cached or should_refresh_live("THESIS", cache_age, rank))
+        want_live = want_live or should_force_live  # Chaos mode override
 
-if want_live:
-    candles_1h = get_candles(coin, "1h", 100, force=True)
-    if candles_1h:
-        data_source = "LIVE"
-        mark_api_call("candles")
-    else:
-        candles_1h = get_candles(coin, "1h", 100, force=False)
-        data_source = "CACHE" if candles_1h else "NONE"
-else:
-    candles_1h = get_candles(coin, "1h", 100, force=False)
-    data_source = "CACHE" if candles_1h else "NONE"
-    # JANGAN mark_api_call() di sini — cache hit
+        if want_live:
+            candles_1h = get_candles(coin, "1h", 100, force=True)
+            if candles_1h:
+                data_source = "LIVE"
+                mark_api_call("candles")
+            else:
+                candles_1h = get_candles(coin, "1h", 100, force=False)
+                data_source = "CACHE" if candles_1h else "NONE"
+        else:
+            candles_1h = get_candles(coin, "1h", 100, force=False)
+            data_source = "CACHE" if candles_1h else "NONE"
 
         candles_len = len(candles_1h) if candles_1h else 0
         logger.info(f"   candles={candles_len} source={data_source} cache_age={cache_age:.0f}s")
 
-        # ===== Observability: catat SETIAP percobaan scan, terlepas hasil =====
+        # ===== Observability: catat SETIAP percobaan scan =====
         inc_pipeline_counter("scan_total")
         if data_source == "CACHE":
             inc_pipeline_counter("cache_scan")
@@ -17027,7 +16993,6 @@ else:
                                              rank=rank, cache_age=cache_age, data_source=data_source)
         
         if alert:
-            # Store OBS memory untuk ranking boost cycle berikutnya
             store_obs_memory(
                 coin,
                 alert.get('score', 0),
