@@ -14963,18 +14963,34 @@ def check_entry_alert_v10_phase1(coin: str, mark: float, master_candles: Dict,
         # ===== LAYER 1: OBSERVE =====
         record_gate_seen("obs")
         obs = observe_market(coin, mark, master_candles)
-        if not obs or obs.get("status") == "REJECT":
-            reason = obs.get("reason", "observe_failed") if obs else "observe_none"
+        if not obs:
+            logger.debug(f"❌ OBS REJECT {coin}: observe_failed")
+            record_opportunity_rejected(coin, "observe_failed")
+            inc_pipeline_counter("reject_obs")
+            record_reject("obs", "observe_failed")
+            emit_velocity_skip(
+                coin=coin,
+                reason="observe_failed",
+                stage="OBS",
+                regime=None,
+                cache_age=cache_age,
+                source=data_source,
+            )
+            return None
+
+        # ===== P0: HANDLE OBSERVING STATUS =====
+        if obs.get("status") == "OBSERVING":
+            logger.debug(f"🔍 OBSERVING {coin}: {obs.get('progress', '?')}")
+            # Tidak reject, hanya skip untuk cycle ini (masih kumpulkan observasi)
+            inc_pipeline_counter("obs_observing")
+            return None
+
+        if obs.get("status") == "REJECT":
+            reason = obs.get("reason", "observe_rejected")
             logger.debug(f"❌ OBS REJECT {coin}: {reason}")
             record_opportunity_rejected(coin, reason)
             inc_pipeline_counter("reject_obs")
             record_reject("obs", reason)
-            # ===== P4.1: EMIT VELOCITY SKIP WITH CONTEXT =====
-            # obs may be None (observe_market returned nothing), or a REJECT
-            # dict that fired before get_all_regimes() ran (e.g. stale
-            # snapshot, low data confidence) and so has no market_regime —
-            # in both cases regime stays None, not "UNKNOWN", since the
-            # regime detector itself was never reached.
             emit_velocity_skip(
                 coin=coin,
                 reason=reason,
