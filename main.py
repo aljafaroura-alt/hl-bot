@@ -16033,6 +16033,143 @@ def get_fallback_candidates(limit: int = 12) -> List[str]:
     with _LAST_GOOD_CANDIDATES_LOCK:
         return _LAST_GOOD_CANDIDATES[:limit]
 
+# ============================================================
+# P0: CONDITIONAL BTC INJECTION (BUKAN PRIVILEGED ADMISSION)
+# ============================================================
+
+# Cache untuk discovery scores per cycle (biar gak recompute)
+_disco_scores_cache: Dict[str, float] = {}
+_disco_scores_cache_lock = threading.RLock()
+
+def cache_discovery_scores(scores: Dict[str, float]):
+    """Cache discovery scores for use in BTC injection."""
+    with _disco_scores_cache_lock:
+        _disco_scores_cache.update(scores)
+        # Keep cache bounded
+        if len(_disco_scores_cache) > 500:
+            _disco_scores_cache.clear()
+
+
+def clear_discovery_cache():
+    """Clear discovery score cache at end of cycle."""
+    with _disco_scores_cache_lock:
+        _disco_scores_cache.clear()
+
+
+def inject_context_coin(
+    candidates: List[str],
+    snapshot: MarketSnapshot,
+    max_candidates: int,
+    use_strict_gate: bool = True
+) -> List[str]:
+    """
+    Inject BTC as context coin ONLY IF:
+    1. BTC not already in candidates
+    2. BTC is a valid coin in snapshot
+    3. BTC's discovery score is above the current dynamic gate
+    
+    This replaces the privileged admission (insert(0, "BTC")) 
+    with a merit-based conditional injection.
+    """
+    if "BTC" in candidates:
+        return candidates
+    
+    if not snapshot or "BTC" not in snapshot.mids:
+        return candidates
+    
+    # ===== GATE 1: OI minimum =====
+    oi_usd = snapshot.oi.get("BTC", 0)
+    if oi_usd < 0.25:  # OI minimum gate ($250k)
+        return candidates
+    
+    # ===== GATE 2: Viability (OI/Volume ratio) =====
+    if not is_viable_coin("BTC"):
+        return candidates
+    
+    # ===== GATE 3: Discovery score =====
+    try:
+        imbalance = compute_imbalance_strength("BTC")
+        magnitude = imbalance.get("magnitude", 0)
+        persistence = imbalance.get("persistence", 0)
+        data_conf = imbalance.get("data_confidence", 0)
+        
+        # Use dynamic gate based on current market
+        dynamic_gate = compute_dynamic_magnitude_gate("RANGING")
+        if use_strict_gate:
+            min_magnitude = dynamic_gate
+        else:
+            min_magnitude = max(0.003, dynamic_gate * 0.7)  # Relaxed for context
+        
+        if magnitude < min_magnitude or persistence < 0.3 or data_conf < 0.3:
+            return candidates
+        
+        # Base score = magnitude * 100 (same formula as V12)
+        btc_score = magnitude * 100
+        
+        # Apply same bonuses as other coins (spread compression, persistence)
+        spread_comp = imbalance["components"].get("spread_comp", 0.5)
+        if spread_comp > 0.6:
+            btc_score += 10
+        elif spread_comp > 0.4:
+            btc_score += 5
+        
+        if persistence > 0.7:
+            btc_score += 10
+        elif persistence > 0.55:
+            btc_score += 5
+        
+        # Apply memory decay (BTC may have been selected many times)
+        n = get_coin_selection_count("BTC")
+        btc_score *= math.exp(-0.15 * n)
+        
+    except Exception as e:
+        logger.debug(f"BTC discovery score failed (non-fatal): {e}")
+        return candidates
+    
+    # ===== GATE 4: BTC must earn its slot =====
+    # Compare against current candidate scores
+    candidate_scores = {}
+    for coin in candidates:
+        # Use cached scores if available
+        with _disco_scores_cache_lock:
+            if coin in _disco_scores_cache:
+                candidate_scores[coin] = _disco_scores_cache[coin]
+            else:
+                # Fallback: OI ROC proxy
+                try:
+                    candidate_scores[coin] = get_oi_roc(coin, window_minutes=60) * 5 + 20
+                except:
+                    candidate_scores[coin] = 0
+    
+    # BTC must be at least 80% as good as the weakest candidate
+    if candidates and candidate_scores:
+        min_candidate_score = min(candidate_scores.values())
+        if btc_score < min_candidate_score * 0.8:
+            logger.debug(
+                f"BTC score {btc_score:.0f} < {min_candidate_score * 0.8:.0f} "
+                f"(min candidate), not injecting"
+            )
+            return candidates
+        logger.debug(
+            f"BTC qualified: score={btc_score:.0f} vs min={min_candidate_score:.0f}"
+        )
+    
+    # BTC earned its slot
+    candidates.append("BTC")
+    
+    # Ensure we don't exceed max_candidates
+    if len(candidates) > max_candidates:
+        # Sort by score before truncating
+        try:
+            with _disco_scores_cache_lock:
+                all_scores = {c: _disco_scores_cache.get(c, 0) for c in candidates}
+                candidates.sort(key=lambda c: all_scores.get(c, 0), reverse=True)
+        except:
+            pass
+        candidates = candidates[:max_candidates]
+    
+    return candidates
+
 def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
     """
     Discovery V11 Final: Capital Rotation Detector (Production-Ready)
