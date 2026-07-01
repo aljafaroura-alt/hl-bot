@@ -12147,7 +12147,28 @@ def observe_market(coin: str, mark: float, master_candles: Dict) -> Optional[Dic
         logger.warning(f"🔴 Degraded mode: snapshot age {snapshot_age:.1f}s, skipping new entries")
         return {"status": "REJECT", "reason": f"snapshot_stale_{int(snapshot_age)}s", "coin": coin, "mark": mark}
 
+    # ============================================================
+    # P0: BROKER PATIENCE — Observasi vs Fetch Balance
+    # ============================================================
+    required_obs = get_required_observations(coin)
+    
+    with _obs_counter_lock:
+        _obs_counter[coin] = _obs_counter.get(coin, 0) + 1
+        current_obs = _obs_counter[coin]
+    
+    # Jika belum mencapai required_obs, tetap observasi tapi belum fetch
+    if current_obs < required_obs:
+        logger.debug(f"🔍 OBSERVING {coin}: {current_obs}/{required_obs} (patience={get_broker_patience(coin):.2f})")
+        # Reset counter setelah mencapai threshold? Tidak, biarkan akumulasi.
+        return {"status": "OBSERVING", "coin": coin, "progress": f"{current_obs}/{required_obs}"}
+    
+    # Reset counter setelah mencapai threshold
+    with _obs_counter_lock:
+        _obs_counter[coin] = 0
+
+    # ===== CONTINUE EXISTING LOGIC =====
     data_confidence, ages = get_data_confidence(coin, time.time())
+
     if stale_mode:
         data_confidence = int(data_confidence * 0.8)
     
