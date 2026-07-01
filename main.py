@@ -16356,9 +16356,16 @@ def build_candidate_pool_v11_final(max_candidates: int = 12) -> List[str]:
         final_sorted = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         candidates = [c for c, _ in final_sorted[:max_candidates]]
 
-        if "BTC" not in candidates:
-            candidates.insert(0, "BTC")
-            candidates = candidates[:max_candidates]
+        # Cache scores for BTC injection
+        cache_discovery_scores(scores)
+
+        # P0: Conditional BTC injection (bukan privileged admission)
+        candidates = inject_context_coin(
+            candidates=candidates,
+            snapshot=snapshot,
+            max_candidates=max_candidates,
+            use_strict_gate=True
+        )
 
         # Record selection
         with _candidate_history_lock:
@@ -16572,9 +16579,16 @@ def build_candidate_pool_v12(max_candidates: int = 12) -> List[str]:
         sorted_coins = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         candidates = [c for c, _ in sorted_coins[:max_candidates]]
 
-        if "BTC" not in candidates and "BTC" in snapshot.mids:
-            candidates.insert(0, "BTC")
-            candidates = candidates[:max_candidates]
+        # Cache scores for BTC injection
+        cache_discovery_scores(scores)
+
+        # P0: Conditional BTC injection (bukan privileged admission)
+        candidates = inject_context_coin(
+            candidates=candidates,
+            snapshot=snapshot,
+            max_candidates=max_candidates,
+            use_strict_gate=True
+        )
 
         with _candidate_history_lock:
             for coin in candidates:
@@ -17348,9 +17362,10 @@ def scheduled_state_engine_v11():
             logger.exception("STATE_ENGINE_CRASH — cycle skipped, thread alive")
         RUNTIME.wait(interval)
 
-
 def state_engine_update_v12():
     """State Engine V12: Discovery v12 (imbalance strength) + Entry Window."""
+    # ===== P0: Clear discovery cache setiap cycle =====
+    clear_discovery_cache()
     # ===== DYNAMIC AGGRESSION: update heat + trigger burst + cleanup memory =====
     update_market_heat()
     check_and_trigger_burst()
