@@ -7155,20 +7155,186 @@ def update_candle_ttl_from_meta(meta):
     except Exception as e:
         logger.debug(f"update_candle_ttl_from_meta error: {e}")
 
+# ============================================================
+# P0: MARKET HALF-LIFE ENGINE
+# ============================================================
 
+def compute_market_half_life(coin: str) -> float:
+    """
+    Market half-life dengan EWMA smoothing.
+    Mencegah cache thrashing akibat spike sesaat.
+    """
+    try:
+        ctx = get_context_snapshot(coin)
+    except Exception:
+        return 0.3  # Default neutral
+    
+    # ===== RAW ENTROPY =====
+    shock_norm = ctx.shock_score / 100.0 if ctx.shock_score <= 100 else min(1.0, ctx.shock_score / 100.0)
+    
+    try:
+        velocity_score, _ = get_velocity_score(coin, "LONG")
+        velocity_norm = velocity_score / 100.0
+    except Exception:
+        velocity_norm = 0.3
+    
+    try:
+        spread = get_spread_compression(coin)
+        spread_pressure = 1.0 - spread
+    except Exception:
+        spread_pressure = 0.3
+    
+    try:
+        oi_accel = get_oi_acceleration(coin, window=5)
+        oi_pressure = abs(oi_accel)
+    except Exception:
+        oi_pressure = 0.3
+    
+    raw_entropy = (
+        0.35 * shock_norm +
+        0.25 * velocity_norm +
+        0.20 * spread_pressure +
+        0.20 * oi_pressure
+    )
+    raw_entropy = max(0.05, min(1.0, raw_entropy))
+    
+    # ===== EWMA SMOOTHING =====
+    with _entropy_ema_lock:
+        prev = _entropy_ema.get(coin, raw_entropy)
+        smoothed = _ENTROPY_EMA_ALPHA * raw_entropy + (1 - _ENTROPY_EMA_ALPHA) * prev
+        _entropy_ema[coin] = smoothed
+    
+    return smoothed
+
+
+def get_dynamic_ttl(coin: str, base_ttl: int = 300) -> int:
+    """
+    TTL = base_ttl / (1 + entropy * 4)
+    
+    Entropy 0.0 → 300s (tenang)
+    Entropy 0.5 → 100s (normal)
+    Entropy 1.0 → 60s  (chaos)
+    """
+    entropy = compute_market_half_life(coin)
+    ttl = base_ttl / (1 + entropy * 4)
+    return int(max(15, min(600, ttl)))
+
+
+def get_cache_confidence(cache_age: float, entropy: float) -> float:
+    """
+    Confidence = freshness^0.7 × stability^0.3
+    
+    Freshness dominan (0.7) karena data baru tetap berharga
+    meskipun market chaos.
+    """
+    max_ttl = 600
+    freshness = max(0.0, 1.0 - (cache_age / max_ttl))
+    stability = max(0.0, 1.0 - entropy)
+    confidence = (freshness ** 0.7) * (stability ** 0.3)
+    return max(0.0, min(1.0, confidence))
+
+
+def get_broker_patience(coin: str) -> float:
+    """
+    Patience = 1 - entropy
+    
+    Chaos → patience rendah → cepat commit
+    Tenang → patience tinggi → banyak observasi
+    """
+    entropy = compute_market_half_life(coin)
+    return max(0.1, 1.0 - entropy)
+
+
+def get_required_observations(coin: str) -> int:
+    """
+    Jumlah observasi minimal sebelum fetch decision.
+    Patience tinggi → 5 observasi, Patience rendah → 1 observasi
+    """
+    patience = get_broker_patience(coin)
+    obs = int(1 + (patience * 4))
+    return max(1, min(5, obs))
+
+
+def get_chaos_fetch_priority(coin: str, snapshot: MarketSnapshot) -> float:
+    """
+    Priority score untuk chaos mode:
+    - Signal strength
+    - Entropy
+    """
+    try:
+        imbalance = compute_imbalance_strength(coin)
+        signal_strength = abs(imbalance.get("strength", 0))
+    except Exception:
+        signal_strength = 0.3
+    
+    entropy = compute_market_half_life(coin)
+    
+    # Signal strength + entropy
+    priority = signal_strength * 0.5 + entropy * 0.5
+    return max(0.0, min(1.0, priority))
+
+# ============================================================
+# P0: BACKGROUND REFRESH (DEDUPLIKASI)
+# ============================================================
+
+def trigger_background_refresh(coin: str, timeframe: str = "1h", limit: int = 100):
+    """Trigger background refresh dengan deduplikasi."""
+    key = f"candles_{coin}_{timeframe}_{limit}"
+    with _refresh_in_progress_lock:
+        now = time.time()
+        last_refresh = _refresh_in_progress.get(key, 0)
+        if now - last_refresh < _REFRESH_MIN_GAP:
+            return
+        _refresh_in_progress[key] = now
+    
+    _EVAL_EXECUTOR.submit(_refresh_candles_async, coin, timeframe, limit, key)
+
+
+def _refresh_candles_async(coin: str, timeframe: str, limit: int, key: str):
+    """Background refresh dengan deduplikasi."""
+    try:
+        logger.debug(f"🔄 Background refresh: {key}")
+        get_candles(coin, timeframe, limit, force=True)
+    except Exception as e:
+        logger.debug(f"Background refresh failed {key}: {e}")
+    finally:
+        with _refresh_in_progress_lock:
+            _refresh_in_progress.pop(key, None)
+            
 def get_candles(coin: str, timeframe: str, limit: int = 80, master: Dict = None, force: bool = False) -> List[dict]:
     if master and coin in master:
         return master[coin]
     
     key = f"candles_{coin}_{timeframe}_{limit}"
-    ttl = get_candle_ttl(coin, timeframe)  # P2: adaptif, fallback ke basis lama kalau belum ada data
     
-    if not force:
-        cached = CACHE.get(key, max_age=ttl)
-        if cached:
-            return cached
+    # ===== P0: DYNAMIC TTL =====
+    base_ttl = get_candle_ttl(coin, timeframe)
+    dynamic_ttl = get_dynamic_ttl(coin, base_ttl)
     
+    # ===== P0: CACHE CONFIDENCE =====
+    cached = CACHE.get_with_ts(key)
+    if cached and not force:
+        candles, ts = cached
+        cache_age = time.time() - ts
+        entropy = compute_market_half_life(coin)
+        confidence = get_cache_confidence(cache_age, entropy)
+        
+        # DECISION MATRIX
+        if confidence > 0.70:
+            # Confidence tinggi → pakai cache
+            return candles
+        elif confidence > 0.45:
+            # Confidence medium → pakai cache + background refresh
+            trigger_background_refresh(coin, timeframe, limit)
+            return candles
+        # else: confidence rendah → refresh now
+    
+    # ===== LIVE FETCH =====
     if not can_call_api() or not can_call_endpoint("candles"):
+        stale = CACHE.get(key)
+        if stale:
+            logger.debug(f"⏳ Candles cooldown, using stale for {coin}")
+            return stale
         return []
     
     try:
@@ -7178,17 +7344,23 @@ def get_candles(coin: str, timeframe: str, limit: int = 80, master: Dict = None,
         start_ms = end_ms - limit * interval
         candles = info.candles_snapshot(coin, timeframe, start_ms, end_ms) or []
         mark_endpoint_success("candles")
+        
+        # ===== P0: UPDATE CACHE DENGAN TTL BARU =====
+        # Simpan tanpa max_age agar confidence logic yang menentukan
+        CACHE.set(key, candles)
+        return candles
+        
     except Exception as e:
         if "429" in str(e):
-            trigger_api_cooldown(15)  # P4.53: 25→15
+            trigger_api_cooldown(15)
             mark_endpoint_failure("candles")
-            logger.error(f"🚫 Rate limit on candles {coin}")
+            stale = CACHE.get(key)
+            if stale:
+                logger.debug(f"⏳ Rate limit, using stale for {coin}")
+                return stale
             return []
         logger.error(f"get_candles failed for {coin}: {e}")
-        candles = []
-    
-    CACHE.set(key, candles)
-    return candles
+        return []
     
 def get_ob_delta(coin: str) -> float:
     key = f"ob_{coin}"
