@@ -6,8 +6,8 @@
 import time
 from typing import Optional, List, Dict
 
-from ..provider import Provider
-from ..models import (
+from production.provider import Provider
+from production.models import (
     Wallet,
     Order,
     OrderStatus,
@@ -15,7 +15,6 @@ from ..models import (
     ExchangePosition,
     PositionSnapshot,
 )
-
 
 class PaperProvider(Provider):
     """Paper trading provider — simulasi, no real orders."""
