@@ -1,0 +1,69 @@
+# production/config.py
+# ============================================================
+# PRODUCTION CONFIG
+# ============================================================
+
+import os
+from enum import Enum
+
+
+class EntryMode(Enum):
+    """Mode publikasi entry alert."""
+    NONE = "none"          # Gak publish alert
+    PRIVATE = "private"    # Publish ke owner aja
+    PUBLIC = "public"      # Publish ke channel
+
+
+class OpenMode(Enum):
+    """Mode eksekusi order."""
+    NONE = "none"          # Gak eksekusi
+    PAPER = "paper"        # Paper trading (simulasi)
+    TESTNET = "testnet"    # Hyperliquid testnet
+    LIVE = "live"          # Uang asli
+
+
+class OrderType(Enum):
+    MARKET = "market"
+    LIMIT = "limit"
+
+
+class OrderSide(Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderStatus(Enum):
+    PENDING = "pending"
+    OPEN = "open"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class ProductionConfig:
+    """Global production config."""
+    
+    # === EXECUTION MODE ===
+    ENTRY_MODE: EntryMode = EntryMode.PUBLIC
+    OPEN_MODE: OpenMode = OpenMode.PAPER  # Mulai dari PAPER dulu
+    
+    # === MONEY MANAGEMENT ===
+    RISK_PER_TRADE_PCT: float = 1.0          # 1% dari wallet per trade
+    MAX_EXPOSURE_PCT: float = 20.0           # Maks 20% wallet di satu posisi
+    MAX_TOTAL_EXPOSURE_PCT: float = 60.0     # Maks 60% wallet total
+    
+    # === ORDER DEFAULTS ===
+    DEFAULT_ORDER_TYPE: OrderType = OrderType.LIMIT
+    DEFAULT_SLIPPAGE: float = 0.005          # 0.5%
+    
+    # === PROVIDER ===
+    PROVIDER: str = "hyperliquid"
+    
+    # === HYPERLIQUID TESTNET ===
+    TESTNET_WALLET_ADDRESS: Optional[str] = None
+    TESTNET_PRIVATE_KEY: Optional[str] = None
+    
+    # === HYPERLIQUID LIVE ===
+    LIVE_WALLET_ADDRESS: Optional[str] = os.environ.get("HL_WALLET_ADDRESS")
+    LIVE_PRIVATE_KEY: Optional[str] = os.environ.get("HL_PRIVATE_KEY")
