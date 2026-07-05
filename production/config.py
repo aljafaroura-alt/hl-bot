@@ -47,7 +47,7 @@ class ProductionConfig:
     
     # === EXECUTION MODE ===
     ENTRY_MODE: EntryMode = EntryMode.PUBLIC
-    OPEN_MODE: OpenMode = OpenMode.PAPER  # Mulai dari PAPER dulu
+    OPEN_MODE: OpenMode = OpenMode.TESTNET  # Testnet dulu, belum LIVE
     
     # === MONEY MANAGEMENT ===
     RISK_PER_TRADE_PCT: float = 1.0          # 1% dari wallet per trade
@@ -62,8 +62,10 @@ class ProductionConfig:
     PROVIDER: str = "hyperliquid"
     
     # === HYPERLIQUID TESTNET ===
-    TESTNET_WALLET_ADDRESS: Optional[str] = None
-    TESTNET_PRIVATE_KEY: Optional[str] = None
+    # Dead fields — api.py baca langsung dari env var HL_TESTNET_WALLET_ADDRESS /
+    # HL_TESTNET_PRIVATE_KEY, bukan dari sini. Dibiarin buat referensi aja.
+    TESTNET_WALLET_ADDRESS: Optional[str] = os.environ.get("HL_TESTNET_WALLET_ADDRESS")
+    TESTNET_PRIVATE_KEY: Optional[str] = os.environ.get("HL_TESTNET_PRIVATE_KEY")
     
     # === HYPERLIQUID LIVE ===
     LIVE_WALLET_ADDRESS: Optional[str] = os.environ.get("HL_WALLET_ADDRESS")
