@@ -49,6 +49,10 @@ jobs:
           TOKEN: ${{ secrets.TOKEN }}
           USER_ID: ${{ secrets.USER_ID }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          HL_TESTNET_WALLET_ADDRESS: ${{ secrets.HL_TESTNET_WALLET_ADDRESS }}
+          HL_TESTNET_PRIVATE_KEY: ${{ secrets.HL_TESTNET_PRIVATE_KEY }}
+          HL_WALLET_ADDRESS: ${{ secrets.HL_WALLET_ADDRESS }}
+          HL_PRIVATE_KEY: ${{ secrets.HL_PRIVATE_KEY }}
         run: |
           while true
           do
