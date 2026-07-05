@@ -44,6 +44,27 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Debug - Check Env Vars
+        env:
+          HL_TESTNET_WALLET_ADDRESS: ${{ secrets.HL_TESTNET_WALLET_ADDRESS }}
+          HL_TESTNET_PRIVATE_KEY: ${{ secrets.HL_TESTNET_PRIVATE_KEY }}
+        run: |
+          python3 -c "
+          import os
+          addr = os.environ.get('HL_TESTNET_WALLET_ADDRESS')
+          pk = os.environ.get('HL_TESTNET_PRIVATE_KEY')
+          print(f'WALLET_ADDRESS set: {bool(addr)}, len={len(addr) if addr else 0}, value={addr!r}')
+          print(f'PRIVATE_KEY set: {bool(pk)}, len={len(pk) if pk else 0}')
+          "
+
+      - name: Debug - Check Hyperliquid Testnet Balance
+        run: |
+          echo "===== CLEARINGHOUSE STATE (Perps) ====="
+          curl -s -X POST https://api.hyperliquid-testnet.xyz/info \
+            -H "Content-Type: application/json" \
+            -d '{"type": "clearinghouseState", "user": "0x0BbAaeC7F90504573927a77d967Db1118680591f"}' \
+            | python3 -m json.tool
+
       - name: Run Bot
         env:
           TOKEN: ${{ secrets.TOKEN }}
